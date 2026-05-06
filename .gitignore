@@ -1,0 +1,34 @@
+# Build outputs
+**/bin/
+**/obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# IDE
+.vs/
+.idea/
+*.swp
+
+# Secrets — never commit
+**/secrets.json
+appsettings.*.local.json
+
+# Session persistence (sensitive operational data)
+data/sessions/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Python environments
+.venv/
+
+# Test results
+**/TestResults/
+tmp-symlink-to-catherder-instructions-repo
+docker/kreuzberg/config/
+docker/kreuzberg/workspace/

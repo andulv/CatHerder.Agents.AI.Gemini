@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CatHerder.Agents.AI.Gemini/CatHerder.Agents.AI.Gemini.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CatHerder.Agents.AI.Gemini.IntegrationTests/CatHerder.Agents.AI.Gemini.IntegrationTests.csproj" />
+    <Project Path="tests/CatHerder.Agents.AI.Gemini.UnitTests/CatHerder.Agents.AI.Gemini.UnitTests.csproj" />
+  </Folder>
+</Solution>

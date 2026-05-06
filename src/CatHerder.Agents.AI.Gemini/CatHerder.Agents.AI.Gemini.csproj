@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>CatHerder.Agents.AI.Gemini</PackageId>
+    <Title>CatHerder Agent Framework Gemini</Title>
+    <Description>Microsoft Agent Framework and Microsoft.Extensions.AI chat client for the Google Gemini Interactions API.</Description>
+    <PackageTags>AI;Agents;Gemini;Google;Microsoft.Extensions.AI;Microsoft.AgentFramework;IChatClient</PackageTags>
+    <Authors>CatHerder contributors</Authors>
+    <Company>CatHerder contributors</Company>
+    <Version>0.1.0-preview.1</Version>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\..\artifacts\packages</PackageOutputPath>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.4.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
+  </ItemGroup>
+
+</Project>
