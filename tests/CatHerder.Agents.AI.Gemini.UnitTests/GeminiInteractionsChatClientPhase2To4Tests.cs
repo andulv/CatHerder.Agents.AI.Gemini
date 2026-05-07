@@ -248,9 +248,12 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         "id": "interaction-stream-1",
                         "status": "completed",
                         "usage": {
-                          "total_tokens": 8,
+                          "total_tokens": 12,
                           "total_input_tokens": 6,
-                          "total_output_tokens": 2
+                          "total_output_tokens": 2,
+                          "cached_input_tokens": 1,
+                          "thoughts_token_count": 3,
+                          "tool_use_prompt_token_count": 4
                         },
                         "model": "gemini-3-flash-preview"
                       },
@@ -269,10 +272,14 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
         var usage = Assert.Single(AllContents(updates).OfType<UsageContent>());
         Assert.Equal(6, usage.Details.InputTokenCount);
         Assert.Equal(2, usage.Details.OutputTokenCount);
-        Assert.Equal(8, usage.Details.TotalTokenCount);
+        Assert.Equal(12, usage.Details.TotalTokenCount);
+        Assert.Equal(1, usage.Details.CachedInputTokenCount);
+        Assert.Equal(3, usage.Details.ReasoningTokenCount);
+        Assert.NotNull(usage.Details.AdditionalCounts);
+        Assert.Equal(4, usage.Details.AdditionalCounts["tool_use_prompt_token_count"]);
         Assert.Equal("OK.", response.Messages.Single().Text);
         Assert.Equal("interaction-stream-1", response.ConversationId);
-        Assert.Equal(8, response.Usage?.TotalTokenCount);
+        Assert.Equal(12, response.Usage?.TotalTokenCount);
     }
 
     [Fact]

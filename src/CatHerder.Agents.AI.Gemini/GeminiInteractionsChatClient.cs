@@ -743,23 +743,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     }
 
     private static UsageDetails? MapUsageDetails(JsonNode? usageNode)
-    {
-        if (usageNode is null)
-        {
-            return null;
-        }
-
-        var usage = new UsageDetails
-        {
-            InputTokenCount = GetInt(usageNode, "total_input_tokens") ?? GetInt(usageNode, "input_tokens") ?? GetInt(usageNode, "prompt_token_count"),
-            OutputTokenCount = GetInt(usageNode, "total_output_tokens") ?? GetInt(usageNode, "output_tokens") ?? GetInt(usageNode, "candidates_token_count"),
-            TotalTokenCount = GetInt(usageNode, "total_tokens") ?? GetInt(usageNode, "total_token_count"),
-        };
-
-        return usage.InputTokenCount is null && usage.OutputTokenCount is null && usage.TotalTokenCount is null
-            ? null
-            : usage;
-    }
+        => GeminiUsageMapper.Map(usageNode);
 
     private IEnumerable<ChatResponseUpdate> ProcessSseFrame(GeminiSseEventReducer reducer, string? eventType, IReadOnlyList<string> dataLines)
     {
@@ -816,14 +800,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         {
             _logger?.LogWarning("Falling back to non-streaming Gemini response path because SSE negotiation failed: {Reason}", reason);
         }
-    }
-
-    private static int? GetInt(JsonNode node, string property)
-    {
-        var val = node[property];
-        if (val is null) return null;
-        try { return val.GetValue<int>(); }
-        catch { return null; }
     }
 
     private static GeminiApiError? TryParseGeminiError(string responseBody)

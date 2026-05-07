@@ -356,41 +356,7 @@ internal sealed class GeminiSseEventReducer
     }
 
     private static UsageDetails? MapUsageDetails(JsonNode? usageNode)
-    {
-        if (usageNode is null)
-        {
-            return null;
-        }
-
-        var usage = new UsageDetails
-        {
-            InputTokenCount = GetInt(usageNode, "total_input_tokens") ?? GetInt(usageNode, "input_tokens") ?? GetInt(usageNode, "prompt_token_count"),
-            OutputTokenCount = GetInt(usageNode, "total_output_tokens") ?? GetInt(usageNode, "output_tokens") ?? GetInt(usageNode, "candidates_token_count"),
-            TotalTokenCount = GetInt(usageNode, "total_tokens") ?? GetInt(usageNode, "total_token_count"),
-        };
-
-        return usage.InputTokenCount is null && usage.OutputTokenCount is null && usage.TotalTokenCount is null
-            ? null
-            : usage;
-    }
-
-    private static int? GetInt(JsonNode node, string property)
-    {
-        var value = node[property];
-        if (value is null)
-        {
-            return null;
-        }
-
-        try
-        {
-            return value.GetValue<int>();
-        }
-        catch
-        {
-            return null;
-        }
-    }
+        => GeminiUsageMapper.Map(usageNode);
 
     private sealed class InFlightContent
     {
