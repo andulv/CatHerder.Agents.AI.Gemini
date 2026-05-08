@@ -1,3 +1,6 @@
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
@@ -6,6 +9,40 @@ namespace CatHerder.Agents.AI.Gemini.IntegrationTests;
 
 public sealed class GeminiInteractionsLiveTests
 {
+    [LiveGeminiFact]
+    public async Task RawInteractionsRequest_WithMay2026ApiRevision_ReturnsStepsSchema()
+    {
+        var config = LiveGeminiConfiguration.Current;
+        using var httpClient = new HttpClient { BaseAddress = config.Endpoint };
+        using var request = new HttpRequestMessage(HttpMethod.Post, "interactions")
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(new
+                {
+                    model = config.ModelId,
+                    input = "Reply with exactly one short sentence about the color blue.",
+                }),
+                Encoding.UTF8,
+                "application/json"),
+        };
+        request.Headers.Add("x-goog-api-key", config.ApiKey);
+        request.Headers.Add("Api-Revision", "2026-05-20");
+
+        using var response = await httpClient.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        response.EnsureSuccessStatusCode();
+        var root = JsonNode.Parse(body)!.AsObject();
+        var steps = Assert.IsType<JsonArray>(root["steps"]);
+
+        Assert.Null(root["outputs"]);
+        Assert.Contains(
+            steps.OfType<JsonObject>(),
+            step => step["type"]?.GetValue<string>() == "model_output"
+                && step["content"] is JsonArray content
+                && content.OfType<JsonObject>().Any(block => block["type"]?.GetValue<string>() == "text"));
+    }
+
     [LiveGeminiFact]
     public async Task GetResponseAsync_ReturnsTextFromRealApi()
     {

@@ -27,31 +27,28 @@ internal sealed class GeminiSseEventReducer
 
         switch (eventType)
         {
-            case "interaction.start":
+            case "interaction.created":
                 CaptureInteractionMetadata(payload?["interaction"] as JsonObject);
                 break;
 
             case "interaction.status_update":
+                HandleStatusUpdate(payload, updates);
                 break;
 
-            case "content.start":
-                HandleContentStart(payload, updates);
+            case "step.start":
+                HandleStepStart(payload, updates);
                 break;
 
-            case "content.delta":
-                HandleContentDelta(payload, updates);
+            case "step.delta":
+                HandleStepDelta(payload, updates);
                 break;
 
-            case "content.stop":
-                HandleContentStop(payload, updates);
+            case "step.stop":
+                HandleStepStop(payload, updates);
                 break;
 
-            case "interaction.complete":
-                HandleInteractionComplete(payload, updates);
-                break;
-
-            case "error":
-                HandleError(payload, updates);
+            case "interaction.completed":
+                HandleInteractionCompleted(payload, updates);
                 break;
 
             case "done":
@@ -88,32 +85,59 @@ internal sealed class GeminiSseEventReducer
 
     }
 
-    private void HandleContentStart(JsonObject? payload, List<ChatResponseUpdate> updates)
+    private void HandleStatusUpdate(JsonObject? payload, List<ChatResponseUpdate> updates)
+    {
+        var status = payload?["status"]?.GetValue<string>();
+        if (!string.Equals(status, "error", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var error = payload?["error"] as JsonObject ?? payload;
+        var message = error?["message"]?.GetValue<string>() ?? "Gemini streaming error.";
+        _logger?.LogWarning("Gemini streaming error status received: {Message}", message);
+        updates.Add(CreateContentsUpdate([new ErrorContent(message)]));
+    }
+
+    private void HandleStepStart(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
         if (!TryGetIndex(payload, out var index))
         {
             return;
         }
 
-        var content = payload?["content"] as JsonObject;
-        var type = content?["type"]?.GetValue<string>();
+        var step = payload?["step"] as JsonObject;
+        var type = step?["type"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(type))
         {
-            _logger?.LogDebug("Ignoring Gemini SSE content.start without a content type.");
+            _logger?.LogDebug("Ignoring Gemini SSE step.start without a step type.");
             return;
         }
 
         _contentByIndex[index] = new InFlightContent(type)
         {
-            Id = content?["id"]?.GetValue<string>(),
-            CallId = content?["call_id"]?.GetValue<string>(),
-            Payload = content is null ? null : (JsonObject)content.DeepClone(),
+            Id = step?["id"]?.GetValue<string>(),
+            Name = step?["name"]?.GetValue<string>(),
+            CallId = step?["call_id"]?.GetValue<string>(),
+            Arguments = step?["arguments"]?.DeepClone(),
+            Payload = step is null ? null : (JsonObject)step.DeepClone(),
         };
 
+        if (type == "model_output")
+        {
+            EmitModelOutputContent(step?["content"] as JsonArray, updates);
+        }
+        else if (type == "thought")
+        {
+            EmitThoughtSummary(step, updates);
+        }
+
         EmitFunctionCallIfReady(_contentByIndex[index], updates);
+        EmitBuiltInToolCallIfReady(_contentByIndex[index], updates);
+        EmitBuiltInToolResultIfReady(_contentByIndex[index], updates);
     }
 
-    private void HandleContentDelta(JsonObject? payload, List<ChatResponseUpdate> updates)
+    private void HandleStepDelta(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
         if (!TryGetIndex(payload, out var index))
         {
@@ -123,14 +147,14 @@ internal sealed class GeminiSseEventReducer
         var delta = payload?["delta"] as JsonObject;
         if (delta is null)
         {
-            _logger?.LogDebug("Ignoring Gemini SSE content.delta without a delta payload.");
+            _logger?.LogDebug("Ignoring Gemini SSE step.delta without a delta payload.");
             return;
         }
 
         var deltaType = delta["type"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(deltaType))
         {
-            _logger?.LogDebug("Ignoring Gemini SSE content.delta without a delta type.");
+            _logger?.LogDebug("Ignoring Gemini SSE step.delta without a delta type.");
             return;
         }
 
@@ -144,6 +168,18 @@ internal sealed class GeminiSseEventReducer
                 if (!string.IsNullOrEmpty(text))
                 {
                     updates.Add(CreateTextUpdate(text));
+                }
+
+                break;
+
+            case "arguments":
+                content.Type = "function_call";
+                var argumentsDelta = delta["partial_arguments"]?.GetValue<string>()
+                    ?? delta["arguments_delta"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(argumentsDelta))
+                {
+                    content.ArgumentsJsonBuilder ??= new StringBuilder();
+                    content.ArgumentsJsonBuilder.Append(argumentsDelta);
                 }
 
                 break;
@@ -193,12 +229,12 @@ internal sealed class GeminiSseEventReducer
                     break;
                 }
 
-                _logger?.LogDebug("Ignoring unsupported Gemini SSE content delta type {DeltaType}.", deltaType);
+                _logger?.LogDebug("Ignoring unsupported Gemini SSE step delta type {DeltaType}.", deltaType);
                 break;
         }
     }
 
-    private void HandleContentStop(JsonObject? payload, List<ChatResponseUpdate> updates)
+    private void HandleStepStop(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
         if (!TryGetIndex(payload, out var index))
         {
@@ -213,7 +249,7 @@ internal sealed class GeminiSseEventReducer
         }
     }
 
-    private void HandleInteractionComplete(JsonObject? payload, List<ChatResponseUpdate> updates)
+    private void HandleInteractionCompleted(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
         CaptureInteractionMetadata(payload?["interaction"] as JsonObject);
 
@@ -232,14 +268,6 @@ internal sealed class GeminiSseEventReducer
 
         var update = CreateContentsUpdate([new UsageContent(usage)]);
         updates.Add(update);
-    }
-
-    private void HandleError(JsonObject? payload, List<ChatResponseUpdate> updates)
-    {
-        var error = payload?["error"] as JsonObject ?? payload;
-        var message = error?["message"]?.GetValue<string>() ?? "Gemini streaming error.";
-        _logger?.LogWarning("Gemini streaming error event received: {Message}", message);
-        updates.Add(CreateContentsUpdate([new ErrorContent(message)]));
     }
 
     private InFlightContent GetOrCreateContent(int index, string type)
@@ -261,12 +289,13 @@ internal sealed class GeminiSseEventReducer
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(content.Id) || string.IsNullOrWhiteSpace(content.Name) || content.Arguments is null)
+        var arguments = GetFunctionArguments(content);
+        if (string.IsNullOrWhiteSpace(content.Id) || string.IsNullOrWhiteSpace(content.Name) || arguments is null)
         {
             return;
         }
 
-        var argumentsJson = content.Arguments.ToJsonString();
+        var argumentsJson = arguments.ToJsonString();
         var functionCall = FunctionCallContent.CreateFromParsedArguments(
             argumentsJson,
             content.Id,
@@ -275,6 +304,30 @@ internal sealed class GeminiSseEventReducer
 
         updates.Add(CreateContentsUpdate([functionCall]));
         content.FunctionCallEmitted = true;
+    }
+
+    private JsonNode? GetFunctionArguments(InFlightContent content)
+    {
+        if (content.Arguments is not null)
+        {
+            return content.Arguments;
+        }
+
+        if (content.ArgumentsJsonBuilder is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        try
+        {
+            content.Arguments = JsonNode.Parse(content.ArgumentsJsonBuilder.ToString());
+            return content.Arguments;
+        }
+        catch (JsonException ex)
+        {
+            _logger?.LogDebug(ex, "Ignoring incomplete Gemini streamed function-call arguments.");
+            return null;
+        }
     }
 
     private void EmitBuiltInToolCallIfReady(InFlightContent content, List<ChatResponseUpdate> updates)
@@ -304,6 +357,57 @@ internal sealed class GeminiSseEventReducer
 
         updates.Add(CreateContentsUpdate([GeminiBuiltInToolBridge.CreateToolResult(content.Payload)]));
         content.FunctionResultEmitted = true;
+    }
+
+    private void EmitModelOutputContent(JsonArray? contentBlocks, List<ChatResponseUpdate> updates)
+    {
+        if (contentBlocks is null)
+        {
+            return;
+        }
+
+        foreach (var contentBlock in contentBlocks.OfType<JsonObject>())
+        {
+            var type = contentBlock["type"]?.GetValue<string>();
+            if (type == "text")
+            {
+                var text = contentBlock["text"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    updates.Add(CreateTextUpdate(text));
+                }
+
+                continue;
+            }
+
+            if (type == "thought")
+            {
+                EmitThoughtSummary(contentBlock, updates);
+            }
+        }
+    }
+
+    private void EmitThoughtSummary(JsonObject? thought, List<ChatResponseUpdate> updates)
+    {
+        if (thought?["summary"] is JsonArray summaryBlocks)
+        {
+            foreach (var summaryBlock in summaryBlocks.OfType<JsonObject>())
+            {
+                var text = summaryBlock["text"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    updates.Add(CreateContentsUpdate([new TextReasoningContent(text)]));
+                }
+            }
+
+            return;
+        }
+
+        var summary = thought?["summary"]?.GetValue<string>();
+        if (!string.IsNullOrEmpty(summary))
+        {
+            updates.Add(CreateContentsUpdate([new TextReasoningContent(summary)]));
+        }
     }
 
     private ChatResponseUpdate CreateTextUpdate(string text)
@@ -374,6 +478,8 @@ internal sealed class GeminiSseEventReducer
         public string? CallId { get; set; }
 
         public JsonNode? Arguments { get; set; }
+
+        public StringBuilder? ArgumentsJsonBuilder { get; set; }
 
         public JsonObject? Payload { get; set; }
 

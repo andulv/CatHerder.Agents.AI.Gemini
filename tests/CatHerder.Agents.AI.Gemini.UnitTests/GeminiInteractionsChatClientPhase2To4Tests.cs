@@ -28,9 +28,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
 
         var payload = ParseCapturedPayload(handler);
         var input = Assert.IsType<JsonArray>(payload["input"]);
-        var toolTurn = Assert.IsType<JsonObject>(input[2]);
-        var toolTurnContent = Assert.IsType<JsonArray>(toolTurn["content"]);
-        var functionResult = Assert.IsType<JsonObject>(Assert.Single(toolTurnContent));
+        var functionResult = Assert.IsType<JsonObject>(input[2]);
 
         Assert.Equal("function_result", functionResult["type"]!.GetValue<string>());
         Assert.Equal("get_weather", functionResult["name"]!.GetValue<string>());
@@ -55,9 +53,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
 
         var payload = ParseCapturedPayload(handler);
         var input = Assert.IsType<JsonArray>(payload["input"]);
-        var toolTurn = Assert.IsType<JsonObject>(input[1]);
-        var toolTurnContent = Assert.IsType<JsonArray>(toolTurn["content"]);
-        var functionResult = Assert.IsType<JsonObject>(Assert.Single(toolTurnContent));
+        var functionResult = Assert.IsType<JsonObject>(input[1]);
 
         Assert.Equal("function_result", functionResult["type"]!.GetValue<string>());
         Assert.Equal("get_weather", functionResult["name"]!.GetValue<string>());
@@ -84,9 +80,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
 
         var payload = ParseCapturedPayload(handler);
         var input = Assert.IsType<JsonArray>(payload["input"]);
-        var toolTurn = Assert.IsType<JsonObject>(Assert.Single(input));
-        var toolTurnContent = Assert.IsType<JsonArray>(toolTurn["content"]);
-        var functionResultPayload = Assert.IsType<JsonObject>(Assert.Single(toolTurnContent));
+        var functionResultPayload = Assert.IsType<JsonObject>(Assert.Single(input));
 
         Assert.Equal("get_weather", functionResultPayload["name"]!.GetValue<string>());
     }
@@ -133,7 +127,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
               "model": "gemini-3-flash-preview",
               "input": [
                 {
-                  "role": "user",
+                  "type": "user_input",
                   "content": [
                     {
                       "type": "text",
@@ -142,28 +136,18 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                   ]
                 },
                 {
-                  "role": "model",
-                  "content": [
-                    {
-                      "type": "function_call",
-                      "id": "call-9",
-                      "name": "get_weather",
-                      "arguments": {
-                        "location": "Oslo"
-                      }
-                    }
-                  ]
+                  "type": "function_call",
+                  "id": "call-9",
+                  "name": "get_weather",
+                  "arguments": {
+                    "location": "Oslo"
+                  }
                 },
                 {
-                  "role": "user",
-                  "content": [
-                    {
-                      "type": "function_result",
-                      "name": "get_weather",
-                      "call_id": "call-9",
-                      "result": "Sunny"
-                    }
-                  ]
+                  "type": "function_result",
+                  "name": "get_weather",
+                  "call_id": "call-9",
+                  "result": "Sunny"
                 }
               ],
               "system_instruction": "Be terse.",
@@ -206,7 +190,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     {
         var handler = new StreamingRequestHandler(
             CreateSseResponse(CreateSsePayload(
-                BuildEvent("interaction.start", """
+                BuildEvent("interaction.created", """
                     {
                       "interaction": {
                         "id": "interaction-stream-1",
@@ -214,35 +198,35 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         "object": "interaction",
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.start"
+                      "event_type": "interaction.created"
                     }
                     """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 0,
-                      "content": {
-                        "type": "text"
+                      "step": {
+                        "type": "model_output"
                       },
-                      "event_type": "content.start"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.delta", """
+                BuildEvent("step.delta", """
                     {
                       "index": 0,
                       "delta": {
                         "text": "OK.",
                         "type": "text"
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.delta"
                     }
                     """),
-                BuildEvent("content.stop", """
+                BuildEvent("step.stop", """
                     {
                       "index": 0,
-                      "event_type": "content.stop"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("interaction.complete", """
+                BuildEvent("interaction.completed", """
                     {
                       "interaction": {
                         "id": "interaction-stream-1",
@@ -257,7 +241,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         },
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.complete"
+                      "event_type": "interaction.completed"
                     }
                     """),
                 BuildEvent("done", "[DONE]"))));
@@ -287,7 +271,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     {
         var handler = new StreamingRequestHandler(
             CreateSseResponse(CreateSsePayload(
-                BuildEvent("interaction.start", """
+                BuildEvent("interaction.created", """
                     {
                       "interaction": {
                         "id": "interaction-stream-2",
@@ -295,40 +279,37 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         "object": "interaction",
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.start"
+                      "event_type": "interaction.created"
                     }
                     """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 0,
-                      "content": {
+                      "step": {
                         "type": "function_call",
-                        "id": "call-123"
+                        "id": "call-123",
+                        "name": "get_weather"
                       },
-                      "event_type": "content.start"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.delta", """
+                BuildEvent("step.delta", """
                     {
                       "index": 0,
                       "delta": {
-                        "name": "get_weather",
-                        "arguments": {
-                          "location": "Oslo"
-                        },
-                        "type": "function_call",
-                        "id": "call-123"
+                        "type": "arguments",
+                        "partial_arguments": "{\"location\":\"Oslo\"}"
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.delta"
                     }
                     """),
-                BuildEvent("content.stop", """
+                BuildEvent("step.stop", """
                     {
                       "index": 0,
-                      "event_type": "content.stop"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("interaction.complete", """
+                BuildEvent("interaction.completed", """
                     {
                       "interaction": {
                         "id": "interaction-stream-2",
@@ -340,7 +321,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         },
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.complete"
+                      "event_type": "interaction.completed"
                     }
                     """),
                 BuildEvent("done", "[DONE]"))));
@@ -368,7 +349,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
         using var listener = CreateAgentActivityListener(activities);
         var handler = new StreamingRequestHandler(
             CreateSseResponse(CreateSsePayload(
-                BuildEvent("interaction.start", """
+                BuildEvent("interaction.created", """
                     {
                       "interaction": {
                         "id": "interaction-stream-built-in",
@@ -376,52 +357,32 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         "object": "interaction",
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.start"
+                      "event_type": "interaction.created"
                     }
                     """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 0,
-                      "content": {
-                        "type": "google_search_call",
-                        "id": "search-456"
-                      },
-                      "event_type": "content.start"
-                    }
-                    """),
-                BuildEvent("content.delta", """
-                    {
-                      "index": 0,
-                      "delta": {
+                      "step": {
                         "type": "google_search_call",
                         "id": "search-456",
                         "arguments": {
                           "queries": ["restaurants bergen"]
                         }
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.stop", """
+                BuildEvent("step.stop", """
                     {
                       "index": 0,
-                      "event_type": "content.stop"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 1,
-                      "content": {
-                        "type": "google_search_result",
-                        "call_id": "search-456"
-                      },
-                      "event_type": "content.start"
-                    }
-                    """),
-                BuildEvent("content.delta", """
-                    {
-                      "index": 1,
-                      "delta": {
+                      "step": {
                         "type": "google_search_result",
                         "call_id": "search-456",
                         "result": [
@@ -432,41 +393,41 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         ],
                         "rendered_content": "<div>chips</div>"
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.stop", """
+                BuildEvent("step.stop", """
                     {
                       "index": 1,
-                      "event_type": "content.stop"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 2,
-                      "content": {
-                        "type": "text"
+                      "step": {
+                        "type": "model_output"
                       },
-                      "event_type": "content.start"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.delta", """
+                BuildEvent("step.delta", """
                     {
                       "index": 2,
                       "delta": {
                         "type": "text",
                         "text": "Try these places."
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.delta"
                     }
                     """),
-                BuildEvent("content.stop", """
+                BuildEvent("step.stop", """
                     {
                       "index": 2,
-                      "event_type": "content.stop"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("interaction.complete", """
+                BuildEvent("interaction.completed", """
                     {
                       "interaction": {
                         "id": "interaction-stream-built-in",
@@ -478,7 +439,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         },
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.complete"
+                      "event_type": "interaction.completed"
                     }
                     """),
                 BuildEvent("done", "[DONE]"))));
@@ -511,7 +472,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     {
         var handler = new StreamingRequestHandler(
             CreateSseResponse(CreateSsePayload(
-                BuildEvent("interaction.start", """
+                BuildEvent("interaction.created", """
                     {
                       "interaction": {
                         "id": "interaction-stream-3",
@@ -519,72 +480,57 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         "object": "interaction",
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.start"
+                      "event_type": "interaction.created"
                     }
                     """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 0,
-                      "content": {
-                        "type": "thought"
-                      },
-                      "event_type": "content.start"
-                    }
-                    """),
-                BuildEvent("content.delta", """
-                    {
-                      "index": 0,
-                      "delta": {
+                      "step": {
+                        "type": "thought",
                         "signature": "sig-1",
-                        "type": "thought_signature"
+                        "summary": [
+                          {
+                            "type": "text",
+                            "text": "Thinking..."
+                          }
+                        ]
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.delta", """
+                BuildEvent("step.stop", """
                     {
                       "index": 0,
-                      "delta": {
-                        "type": "thought_summary",
-                        "content": {
-                          "text": "Thinking..."
-                        }
-                      },
-                      "event_type": "content.delta"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("content.stop", """
-                    {
-                      "index": 0,
-                      "event_type": "content.stop"
-                    }
-                    """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 1,
-                      "content": {
-                        "type": "text"
+                      "step": {
+                        "type": "model_output"
                       },
-                      "event_type": "content.start"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.delta", """
+                BuildEvent("step.delta", """
                     {
                       "index": 1,
                       "delta": {
                         "text": "Answer",
                         "type": "text"
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.delta"
                     }
                     """),
-                BuildEvent("content.stop", """
+                BuildEvent("step.stop", """
                     {
                       "index": 1,
-                      "event_type": "content.stop"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("interaction.complete", """
+                BuildEvent("interaction.completed", """
                     {
                       "interaction": {
                         "id": "interaction-stream-3",
@@ -596,7 +542,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         },
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.complete"
+                      "event_type": "interaction.completed"
                     }
                     """),
                 BuildEvent("done", "[DONE]"))));
@@ -617,7 +563,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     {
         var handler = new StreamingRequestHandler(
             CreateSseResponse(CreateSsePayload(
-                BuildEvent("interaction.start", """
+                BuildEvent("interaction.created", """
                     {
                       "interaction": {
                         "id": "interaction-stream-4",
@@ -625,7 +571,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         "object": "interaction",
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.start"
+                      "event_type": "interaction.created"
                     }
                     """),
                 BuildEvent("weird.event", """
@@ -633,32 +579,32 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                       "foo": "bar"
                     }
                     """),
-                BuildEvent("content.start", """
+                BuildEvent("step.start", """
                     {
                       "index": 0,
-                      "content": {
-                        "type": "text"
+                      "step": {
+                        "type": "model_output"
                       },
-                      "event_type": "content.start"
+                      "event_type": "step.start"
                     }
                     """),
-                BuildEvent("content.delta", """
+                BuildEvent("step.delta", """
                     {
                       "index": 0,
                       "delta": {
                         "text": "OK",
                         "type": "text"
                       },
-                      "event_type": "content.delta"
+                      "event_type": "step.delta"
                     }
                     """),
-                BuildEvent("content.stop", """
+                BuildEvent("step.stop", """
                     {
                       "index": 0,
-                      "event_type": "content.stop"
+                      "event_type": "step.stop"
                     }
                     """),
-                BuildEvent("interaction.complete", """
+                BuildEvent("interaction.completed", """
                     {
                       "interaction": {
                         "id": "interaction-stream-4",
@@ -670,7 +616,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                         },
                         "model": "gemini-3-flash-preview"
                       },
-                      "event_type": "interaction.complete"
+                      "event_type": "interaction.completed"
                     }
                     """),
                 BuildEvent("done", "[DONE]"))));
@@ -691,10 +637,15 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
             {
               "id": "interaction-json-fallback",
               "model": "gemini-3-flash-preview",
-              "outputs": [
+              "steps": [
                 {
-                  "type": "text",
-                  "text": "fallback ok"
+                  "type": "model_output",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "fallback ok"
+                    }
+                  ]
                 }
               ],
               "usage": {
@@ -726,7 +677,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     public async Task GetStreamingResponseAsync_Cancellation_MidStream_StopsCleanly()
     {
         var firstChunk = CreateSsePayload(
-            BuildEvent("interaction.start", """
+            BuildEvent("interaction.created", """
                 {
                   "interaction": {
                     "id": "interaction-stream-5",
@@ -734,26 +685,26 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                     "object": "interaction",
                     "model": "gemini-3-flash-preview"
                   },
-                  "event_type": "interaction.start"
+                  "event_type": "interaction.created"
                 }
                 """),
-            BuildEvent("content.start", """
+            BuildEvent("step.start", """
                 {
                   "index": 0,
-                  "content": {
-                    "type": "text"
+                  "step": {
+                    "type": "model_output"
                   },
-                  "event_type": "content.start"
+                  "event_type": "step.start"
                 }
                 """),
-            BuildEvent("content.delta", """
+            BuildEvent("step.delta", """
                 {
                   "index": 0,
                   "delta": {
                     "text": "partial",
                     "type": "text"
                   },
-                  "event_type": "content.delta"
+                  "event_type": "step.delta"
                 }
                 """));
 
@@ -872,10 +823,15 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
             {
               "id": "interaction-1",
               "model": "gemini-3-flash-preview",
-              "outputs": [
+              "steps": [
                 {
-                  "type": "text",
-                  "text": "ok"
+                  "type": "model_output",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "ok"
+                    }
+                  ]
                 }
               ]
             }

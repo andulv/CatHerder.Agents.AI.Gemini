@@ -4,7 +4,7 @@ description: "Project status and roadmap for CatHerder.Agents.AI.Gemini"
 ---
 # Project Status & Roadmap - CatHerder.Agents.AI.Gemini
 
-Last updated: 2026-05-08T01:34:59+02:00
+Last updated: 2026-05-08T02:03:34+02:00
 
 ## Phase Overview
 
@@ -17,11 +17,12 @@ Last updated: 2026-05-08T01:34:59+02:00
 
 ## Current Focus
 - Finish Plan 058 publish-readiness tasks: CI, package-content verification, release notes, and known limitations.
-- Address Plan 059 before 2026-05-26: choose whether to opt in to `Api-Revision: 2026-05-20` or temporarily pin legacy `2026-05-07`, then update request/stream parsing for the new steps schema.
+- Plan 059 is complete: Interactions requests opt in with `Api-Revision: 2026-05-20`, the package maps the May 2026 `steps` schema, and legacy `outputs` support is intentionally removed.
 
 ## Validation
 - Default verification: `dotnet build` and `dotnet test tests/CatHerder.Agents.AI.Gemini.UnitTests`.
 - Live integration tests require `GOOGLE_API_KEY` and `GEMINI_INTERACTIONS_MODEL`.
+- Last Plan 059 validation also passed `dotnet test tests/CatHerder.Agents.AI.Gemini.IntegrationTests --no-restore` with built-in tool live tests skipped by opt-in.
 
 ## Open Questions
 - Final NuGet owner/account and repository URL before publish.

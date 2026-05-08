@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using CatHerder.Agents.AI.Gemini;
 using Microsoft.Extensions.AI;
@@ -9,6 +10,18 @@ namespace CatHerder.Agents.AI.Gemini.UnitTests;
 
 public sealed class GeminiInteractionsChatClientTests
 {
+    [Fact]
+    public async Task GetResponseAsync_SendsMay2026ApiRevisionHeader()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]);
+
+        Assert.Equal("2026-05-20", handler.LastApiRevision);
+    }
+
     [Fact]
     public async Task GetResponseAsync_OmitsTools_WhenNoGeminiBuiltInToolsConfigured()
     {
@@ -176,11 +189,7 @@ public sealed class GeminiInteractionsChatClientTests
         var input = Assert.IsType<JsonArray>(payload["input"]);
         Assert.Equal(3, input.Count);
 
-        var toolTurn = Assert.IsType<JsonObject>(input[2]);
-        Assert.Equal("user", toolTurn["role"]!.GetValue<string>());
-
-        var toolTurnContent = Assert.IsType<JsonArray>(toolTurn["content"]);
-        var functionResult = Assert.IsType<JsonObject>(Assert.Single(toolTurnContent));
+        var functionResult = Assert.IsType<JsonObject>(input[2]);
 
         Assert.Equal("function_result", functionResult["type"]!.GetValue<string>());
         Assert.Equal("get_weather", functionResult["name"]!.GetValue<string>());
@@ -218,7 +227,7 @@ public sealed class GeminiInteractionsChatClientTests
             {
               "id": "interaction-1",
               "model": "gemini-3-flash-preview",
-              "outputs": [
+              "steps": [
                 {
                   "type": "function_call",
                   "id": "k9323oby",
@@ -251,13 +260,13 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
-    public async Task GetResponseAsync_MapsFunctionCallOutputToFunctionCallContent()
+    public async Task GetResponseAsync_MapsFunctionCallStepToFunctionCallContent()
     {
         const string responseJson = """
             {
               "id": "interaction-2",
               "model": "gemini-3-flash-preview",
-              "outputs": [
+              "steps": [
                 {
                   "type": "function_call",
                   "id": "call-123",
@@ -284,69 +293,140 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.True(functionCall.Arguments!.ContainsKey("location"));
     }
 
-        [Fact]
-        public async Task GetResponseAsync_MapsGeminiBuiltInToolOutputs_AndEmitsToolTelemetry()
+    [Fact]
+    public async Task GetResponseAsync_Throws_WhenLegacyOutputsOnlyResponseIsReturned()
+    {
+        const string responseJson = """
+            {
+              "id": "interaction-legacy",
+              "model": "gemini-3-flash-preview",
+              "outputs": [
+                {
+                  "type": "text",
+                  "text": "legacy"
+                }
+              ]
+            }
+            """;
+
+        var handler = new RecordingHandler(HttpStatusCode.OK, responseJson);
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]));
+
+        Assert.Contains("steps", ex.Message);
+        Assert.Contains("2026-05-20", ex.Message);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_MapsJsonResponseFormat_ToPolymorphicResponseFormat()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        using var schemaDocument = JsonDocument.Parse("""
+            {
+              "type": "object",
+              "properties": {
+                "summary": { "type": "string" }
+              },
+              "required": ["summary"]
+            }
+            """);
+
+        await client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, "Summarize this.")],
+            new ChatOptions
+            {
+                ResponseFormat = ChatResponseFormat.ForJsonSchema(schemaDocument.RootElement.Clone()),
+            });
+
+        var payload = ParseCapturedPayload(handler);
+        var responseFormat = Assert.IsType<JsonObject>(payload["response_format"]);
+        Assert.Equal("text", responseFormat["type"]!.GetValue<string>());
+        Assert.Equal("application/json", responseFormat["mime_type"]!.GetValue<string>());
+        Assert.Equal("object", responseFormat["schema"]!["type"]!.GetValue<string>());
+        Assert.Null(payload["response_mime_type"]);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_MapsGeminiBuiltInToolSteps_AndEmitsToolTelemetry()
+    {
+        var responseJson = JsonSerializer.Serialize(new
         {
-                const string responseJson = """
+            id = "interaction-3",
+            model = "gemini-3-flash-preview",
+            steps = new object[]
+            {
+                new
+                {
+                    type = "google_search_call",
+                    id = "search-123",
+                    arguments = new
+                    {
+                        queries = new[] { "weather oslo" },
+                    },
+                },
+                new
+                {
+                    type = "google_search_result",
+                    call_id = "search-123",
+                    result = new[]
+                    {
+                        new
                         {
-                            "id": "interaction-3",
-                            "model": "gemini-3-flash-preview",
-                            "outputs": [
-                                {
-                                    "type": "google_search_call",
-                                    "id": "search-123",
-                                    "arguments": {
-                                        "queries": ["weather oslo"]
-                                    }
-                                },
-                                {
-                                    "type": "google_search_result",
-                                    "call_id": "search-123",
-                                    "result": [
-                                        {
-                                            "url": "https://example.com/weather",
-                                            "title": "Example Weather"
-                                        }
-                                    ],
-                                    "rendered_content": "<div>chips</div>"
-                                },
-                                {
-                                    "type": "text",
-                                    "text": "Oslo is cloudy today."
-                                }
-                            ]
-                        }
-                        """;
+                            url = "https://example.com/weather",
+                            title = "Example Weather",
+                        },
+                    },
+                    rendered_content = "<div>chips</div>",
+                },
+                new
+                {
+                    type = "model_output",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "text",
+                            text = "Oslo is cloudy today.",
+                        },
+                    },
+                },
+            },
+        });
 
-                var activities = new List<Activity>();
-                using var listener = CreateAgentActivityListener(activities);
-                var handler = new RecordingHandler(HttpStatusCode.OK, responseJson);
-                using var httpClient = CreateHttpClient(handler);
-                using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        var activities = new List<Activity>();
+        using var listener = CreateAgentActivityListener(activities);
+        var handler = new RecordingHandler(HttpStatusCode.OK, responseJson);
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
-                var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Weather?")]);
-                var message = Assert.Single(response.Messages);
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Weather?")]);
+        var message = Assert.Single(response.Messages);
 
-                Assert.Equal("Oslo is cloudy today.", message.Text);
+        Assert.Equal("Oslo is cloudy today.", message.Text);
 
-                var functionCall = Assert.Single(message.Contents.OfType<FunctionCallContent>());
-                Assert.True(functionCall.InformationalOnly);
-                Assert.Equal("search-123", functionCall.CallId);
-                Assert.Equal("google_search", functionCall.Name);
-                Assert.Contains("weather oslo", functionCall.Arguments!["queries"]?.ToString());
+        var functionCall = Assert.Single(message.Contents.OfType<FunctionCallContent>());
+        Assert.True(functionCall.InformationalOnly);
+        Assert.Equal("search-123", functionCall.CallId);
+        Assert.Equal("google_search", functionCall.Name);
+        Assert.Contains("weather oslo", functionCall.Arguments!["queries"]?.ToString());
 
-                var functionResult = Assert.Single(message.Contents.OfType<FunctionResultContent>());
-                Assert.Equal("search-123", functionResult.CallId);
-                Assert.Contains("rendered_content", functionResult.Result?.ToString());
-                Assert.Contains("Example Weather", functionResult.Result?.ToString());
+        var functionResult = Assert.Single(message.Contents.OfType<FunctionResultContent>());
+        Assert.Equal("search-123", functionResult.CallId);
+        Assert.Contains("rendered_content", functionResult.Result?.ToString());
+        Assert.Contains("Example Weather", functionResult.Result?.ToString());
 
-                var activity = Assert.Single(activities, activity => Equals(activity.GetTagItem("gen_ai.tool.call.id"), "search-123"));
-                Assert.Equal("execute_tool google_search", activity.OperationName);
-                Assert.Equal("google_search", activity.GetTagItem("gen_ai.tool.name"));
-                Assert.Equal("search-123", activity.GetTagItem("gen_ai.tool.call.id"));
-                Assert.Contains("weather oslo", activity.GetTagItem("gen_ai.tool.call.arguments")?.ToString());
-                Assert.Contains("rendered_content", activity.GetTagItem("gen_ai.tool.call.result")?.ToString());
-        }
+        var activity = Assert.Single(activities);
+        Assert.Equal("execute_tool google_search", activity.OperationName);
+        Assert.Equal("google_search", activity.GetTagItem("gen_ai.tool.name"));
+        Assert.Equal("search-123", activity.GetTagItem("gen_ai.tool.call.id"));
+        Assert.Contains("weather oslo", activity.GetTagItem("gen_ai.tool.call.arguments")?.ToString());
+        Assert.Contains("rendered_content", activity.GetTagItem("gen_ai.tool.call.result")?.ToString());
+    }
 
     [Fact]
     public async Task GetResponseAsync_ThrowsGeminiApiException_WithParsedProviderError()
@@ -408,18 +488,26 @@ public sealed class GeminiInteractionsChatClientTests
 
     private sealed class RecordingHandler : HttpMessageHandler
     {
-        private const string DefaultResponseJson = """
+        private static readonly string DefaultResponseJson = JsonSerializer.Serialize(new
+        {
+            id = "interaction-1",
+            model = "gemini-3-flash-preview",
+            steps = new[]
             {
-              "id": "interaction-1",
-              "model": "gemini-3-flash-preview",
-              "outputs": [
+                new
                 {
-                  "type": "text",
-                  "text": "ok"
-                }
-              ]
-            }
-            """;
+                    type = "model_output",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "text",
+                            text = "ok",
+                        },
+                    },
+                },
+            },
+        });
 
         private readonly HttpStatusCode _statusCode;
         private readonly string _responseJson;
@@ -434,6 +522,8 @@ public sealed class GeminiInteractionsChatClientTests
 
         public string? LastRequestBody { get; private set; }
 
+        public string? LastApiRevision { get; private set; }
+
         public int RequestCount { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -442,6 +532,9 @@ public sealed class GeminiInteractionsChatClientTests
             LastRequestBody = request.Content is null
                 ? null
                 : await request.Content.ReadAsStringAsync(cancellationToken);
+            LastApiRevision = request.Headers.TryGetValues("Api-Revision", out var apiRevisionValues)
+                ? Assert.Single(apiRevisionValues)
+                : null;
 
             var responseBody = _responses is { Count: > 0 }
                 ? _responses.Dequeue()

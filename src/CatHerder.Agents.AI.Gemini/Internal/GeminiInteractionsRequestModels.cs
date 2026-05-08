@@ -12,6 +12,8 @@ internal sealed record GeminiInteractionRequest
 
     public GeminiInteractionGenerationConfig? GenerationConfig { get; init; }
 
+    public GeminiInteractionResponseFormat? ResponseFormat { get; init; }
+
     public IReadOnlyList<GeminiInteractionTool>? Tools { get; init; }
 
     public string? PreviousInteractionId { get; init; }
@@ -19,11 +21,21 @@ internal sealed record GeminiInteractionRequest
     public bool? Stream { get; init; }
 }
 
-internal sealed record GeminiInteractionInputTurn
+internal sealed record GeminiInteractionInputStep
 {
-    public required string Role { get; init; }
+    public required string Type { get; init; }
 
-    public required IReadOnlyList<GeminiInteractionContent> Content { get; init; }
+    public IReadOnlyList<GeminiInteractionContent>? Content { get; init; }
+
+    public string? Id { get; init; }
+
+    public string? Name { get; init; }
+
+    public object? Arguments { get; init; }
+
+    public string? CallId { get; init; }
+
+    public object? Result { get; init; }
 }
 
 internal sealed record GeminiInteractionContent
@@ -60,6 +72,15 @@ internal sealed record GeminiInteractionGenerationConfig
     public int? TopK { get; init; }
 
     public IReadOnlyList<string>? StopSequences { get; init; }
+}
+
+internal sealed record GeminiInteractionResponseFormat
+{
+    public required string Type { get; init; }
+
+    public string? MimeType { get; init; }
+
+    public JsonElement? Schema { get; init; }
 }
 
 internal sealed record GeminiInteractionTool

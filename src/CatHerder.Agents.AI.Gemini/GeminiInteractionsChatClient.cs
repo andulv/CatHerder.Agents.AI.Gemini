@@ -16,6 +16,8 @@ namespace CatHerder.Agents.AI.Gemini;
 /// </summary>
 public sealed class GeminiInteractionsChatClient : IChatClient
 {
+    private const string ApiRevisionHeaderName = "Api-Revision";
+    private const string ApiRevisionHeaderValue = "2026-05-20";
     private const string FunctionNamesByCallIdStateKey = "catherder.agents.ai.gemini.function_names_by_call_id";
 
     private readonly HttpClient _httpClient;
@@ -256,10 +258,12 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
     private HttpRequestMessage CreateInteractionRequestMessage(GeminiInteractionRequest request, bool acceptEventStream)
     {
-        var requestMessage = new HttpRequestMessage(HttpMethod.Post, "interactions")
+        var requestMessage = new HttpRequestMessage(HttpMethod.Post, acceptEventStream ? "interactions?alt=sse" : "interactions")
         {
             Content = new StringContent(JsonSerializer.Serialize(request, JsonOptions), Encoding.UTF8, "application/json"),
         };
+
+        requestMessage.Headers.TryAddWithoutValidation(ApiRevisionHeaderName, ApiRevisionHeaderValue);
 
         if (acceptEventStream)
         {
@@ -288,6 +292,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             SystemInstruction = string.IsNullOrWhiteSpace(normalized.SystemInstruction) ? null : normalized.SystemInstruction,
             Input = MapInput(normalized.InputTurns),
             GenerationConfig = MapChatOptionsToGenerationConfig(options),
+            ResponseFormat = MapResponseFormat(options?.ResponseFormat),
             Tools = MapTools(options, _options.BuiltInTools),
             PreviousInteractionId = options?.ConversationId,
             Stream = stream ? true : null,
@@ -333,13 +338,86 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             return singleUserContent;
         }
 
-        return turns
-            .Select(turn => new GeminiInteractionInputTurn
+        return MapInputSteps(turns);
+    }
+
+    private static List<GeminiInteractionInputStep> MapInputSteps(IReadOnlyList<ChatMessage> turns)
+    {
+        var steps = new List<GeminiInteractionInputStep>();
+
+        foreach (var turn in turns)
+        {
+            if (turn.Role == ChatRole.Assistant)
             {
-                Role = turn.Role == ChatRole.Assistant ? "model" : "user",
-                Content = MapTurnContent(turn, turns),
-            })
-            .ToList();
+                AddAssistantInputSteps(turn, turns, steps);
+                continue;
+            }
+
+            if (turn.Role == ChatRole.Tool)
+            {
+                AddFunctionResultInputSteps(turn, turns, steps);
+                continue;
+            }
+
+            var content = MapTurnContent(turn, turns)
+                .Where(item => item.Type == "text" || item.Type == "image")
+                .ToList();
+
+            steps.Add(new GeminiInteractionInputStep
+            {
+                Type = "user_input",
+                Content = content,
+            });
+        }
+
+        return steps;
+    }
+
+    private static void AddAssistantInputSteps(ChatMessage turn, IReadOnlyList<ChatMessage> turns, List<GeminiInteractionInputStep> steps)
+    {
+        var modelOutputContent = new List<GeminiInteractionContent>();
+        foreach (var item in MapTurnContent(turn, turns))
+        {
+            if (item.Type == "function_call")
+            {
+                steps.Add(new GeminiInteractionInputStep
+                {
+                    Type = "function_call",
+                    Id = item.Id,
+                    Name = item.Name,
+                    Arguments = item.Arguments,
+                });
+                continue;
+            }
+
+            if (item.Type == "text" || item.Type == "image")
+            {
+                modelOutputContent.Add(item);
+            }
+        }
+
+        if (modelOutputContent.Count > 0)
+        {
+            steps.Add(new GeminiInteractionInputStep
+            {
+                Type = "model_output",
+                Content = modelOutputContent,
+            });
+        }
+    }
+
+    private static void AddFunctionResultInputSteps(ChatMessage turn, IReadOnlyList<ChatMessage> turns, List<GeminiInteractionInputStep> steps)
+    {
+        foreach (var item in MapTurnContent(turn, turns).Where(item => item.Type == "function_result"))
+        {
+            steps.Add(new GeminiInteractionInputStep
+            {
+                Type = "function_result",
+                Name = item.Name,
+                CallId = item.CallId,
+                Result = item.Result,
+            });
+        }
     }
 
     private static List<GeminiInteractionContent> MapTurnContent(ChatMessage message, IReadOnlyList<ChatMessage> turns)
@@ -595,6 +673,22 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             : generationConfig;
     }
 
+    private static GeminiInteractionResponseFormat? MapResponseFormat(ChatResponseFormat? responseFormat)
+    {
+        return responseFormat switch
+        {
+            null => null,
+            ChatResponseFormatText => null,
+            ChatResponseFormatJson json => new GeminiInteractionResponseFormat
+            {
+                Type = "text",
+                MimeType = "application/json",
+                Schema = json.Schema,
+            },
+            _ => null,
+        };
+    }
+
     private static IReadOnlyList<GeminiInteractionTool>? MapTools(ChatOptions? options, IReadOnlyList<GeminiBuiltInToolKind>? builtInTools)
     {
         var tools = new List<GeminiInteractionTool>();
@@ -659,58 +753,23 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     {
         var interactionId = interaction["id"]?.GetValue<string>();
         var modelId = interaction["model"]?.GetValue<string>();
-        var outputs = interaction["outputs"]?.AsArray();
+        if (interaction["steps"] is not JsonArray steps)
+        {
+            throw new InvalidOperationException(
+                $"Gemini Interactions response did not contain a 'steps' array. This client only supports the {ApiRevisionHeaderValue} steps schema.");
+        }
 
         var textParts = new List<string>();
         var additionalContents = new List<AIContent>();
 
-        if (outputs is not null)
+        foreach (var step in steps)
         {
-            foreach (var output in outputs)
+            if (step is not JsonObject stepObject)
             {
-                if (output is null) continue;
-                var type = output["type"]?.GetValue<string>();
-
-                if (type == "text")
-                {
-                    var text = output["text"]?.GetValue<string>();
-                    if (!string.IsNullOrEmpty(text))
-                        textParts.Add(text);
-                }
-                else if (GeminiBuiltInToolBridge.IsBuiltInToolCallType(type))
-                {
-                    additionalContents.Add(GeminiBuiltInToolBridge.CreateToolCall(output.AsObject()));
-                }
-                else if (GeminiBuiltInToolBridge.IsBuiltInToolResultType(type))
-                {
-                    additionalContents.Add(GeminiBuiltInToolBridge.CreateToolResult(output.AsObject()));
-                }
-                else if (type == "function_call")
-                {
-                    var callId = output["id"]?.GetValue<string>();
-                    var name = output["name"]?.GetValue<string>();
-                    var argumentsNode = output["arguments"];
-                    if (!string.IsNullOrWhiteSpace(callId) && !string.IsNullOrWhiteSpace(name))
-                    {
-                        RememberFunctionName(callId, name);
-                        var argumentsJson = argumentsNode?.ToJsonString()
-                            ?? throw new InvalidOperationException($"Gemini function call '{name}' has null arguments.");
-                        additionalContents.Add(FunctionCallContent.CreateFromParsedArguments(
-                            argumentsJson,
-                            callId,
-                            name,
-                            static json => JsonSerializer.Deserialize<Dictionary<string, object?>>(json)));
-                    }
-                }
-                else if (type == "thought")
-                {
-                    var summary = output["summary"]?.GetValue<string>();
-                    if (!string.IsNullOrEmpty(summary))
-                    {
-                        logger?.LogDebug("Model thought: {Summary}", summary);
-                    }
-                }
+                continue;
             }
+
+            MapStep(stepObject, textParts, additionalContents, logger);
         }
 
         var responseText = string.Join("\n", textParts);
@@ -740,6 +799,138 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             chatResponse.Usage?.TotalTokenCount);
 
         return chatResponse;
+    }
+
+    private static void MapStep(JsonObject step, List<string> textParts, List<AIContent> additionalContents, ILogger? logger)
+    {
+        var type = step["type"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(type))
+        {
+            return;
+        }
+
+        if (type == "model_output")
+        {
+            MapModelOutputStep(step, textParts, additionalContents, logger);
+            return;
+        }
+
+        if (type == "function_call")
+        {
+            AddFunctionCallContent(step, additionalContents);
+            return;
+        }
+
+        if (GeminiBuiltInToolBridge.IsBuiltInToolCallType(type))
+        {
+            additionalContents.Add(GeminiBuiltInToolBridge.CreateToolCall(step));
+            return;
+        }
+
+        if (GeminiBuiltInToolBridge.IsBuiltInToolResultType(type))
+        {
+            additionalContents.Add(GeminiBuiltInToolBridge.CreateToolResult(step));
+            return;
+        }
+
+        if (type == "thought")
+        {
+            LogThoughtSummary(step, logger);
+        }
+    }
+
+    private static void MapModelOutputStep(JsonObject step, List<string> textParts, List<AIContent> additionalContents, ILogger? logger)
+    {
+        if (step["content"] is not JsonArray contentBlocks)
+        {
+            return;
+        }
+
+        foreach (var contentBlock in contentBlocks)
+        {
+            if (contentBlock is not JsonObject contentObject)
+            {
+                continue;
+            }
+
+            var type = contentObject["type"]?.GetValue<string>();
+            if (type == "text")
+            {
+                var text = contentObject["text"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    textParts.Add(text);
+                }
+
+                continue;
+            }
+
+            if (type == "function_call")
+            {
+                AddFunctionCallContent(contentObject, additionalContents);
+                continue;
+            }
+
+            if (GeminiBuiltInToolBridge.IsBuiltInToolCallType(type))
+            {
+                additionalContents.Add(GeminiBuiltInToolBridge.CreateToolCall(contentObject));
+                continue;
+            }
+
+            if (GeminiBuiltInToolBridge.IsBuiltInToolResultType(type))
+            {
+                additionalContents.Add(GeminiBuiltInToolBridge.CreateToolResult(contentObject));
+                continue;
+            }
+
+            if (type == "thought")
+            {
+                LogThoughtSummary(contentObject, logger);
+            }
+        }
+    }
+
+    private static void AddFunctionCallContent(JsonObject payload, List<AIContent> additionalContents)
+    {
+        var callId = payload["id"]?.GetValue<string>();
+        var name = payload["name"]?.GetValue<string>();
+        var argumentsNode = payload["arguments"];
+        if (string.IsNullOrWhiteSpace(callId) || string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        RememberFunctionName(callId, name);
+        var argumentsJson = argumentsNode?.ToJsonString()
+            ?? throw new InvalidOperationException($"Gemini function call '{name}' has null arguments.");
+        additionalContents.Add(FunctionCallContent.CreateFromParsedArguments(
+            argumentsJson,
+            callId,
+            name,
+            static json => JsonSerializer.Deserialize<Dictionary<string, object?>>(json)));
+    }
+
+    private static void LogThoughtSummary(JsonObject thought, ILogger? logger)
+    {
+        if (thought["summary"] is JsonArray summaryBlocks)
+        {
+            foreach (var summaryBlock in summaryBlocks.OfType<JsonObject>())
+            {
+                var summaryText = summaryBlock["text"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(summaryText))
+                {
+                    logger?.LogDebug("Model thought: {Summary}", summaryText);
+                }
+            }
+
+            return;
+        }
+
+        var summary = thought["summary"]?.GetValue<string>();
+        if (!string.IsNullOrWhiteSpace(summary))
+        {
+            logger?.LogDebug("Model thought: {Summary}", summary);
+        }
     }
 
     private static UsageDetails? MapUsageDetails(JsonNode? usageNode)
