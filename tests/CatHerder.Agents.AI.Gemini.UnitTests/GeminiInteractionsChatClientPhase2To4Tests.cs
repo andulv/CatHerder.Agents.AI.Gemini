@@ -343,6 +343,78 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     }
 
     [Fact]
+    public async Task GetStreamingResponseAsync_FunctionCallStream_UsesArgumentsDeltaAfterEmptyStartArguments()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("interaction.created", """
+                    {
+                      "interaction": {
+                        "id": "interaction-stream-arguments-delta",
+                        "status": "in_progress",
+                        "object": "interaction",
+                        "model": "gemini-3-flash-preview"
+                      },
+                      "event_type": "interaction.created"
+                    }
+                    """),
+                BuildEvent("step.start", """
+                    {
+                      "index": 0,
+                      "step": {
+                        "type": "function_call",
+                        "id": "call-arguments-delta",
+                        "name": "RunBashCommand",
+                        "arguments": {}
+                      },
+                      "event_type": "step.start"
+                    }
+                    """),
+                BuildEvent("step.delta", """
+                    {
+                      "index": 0,
+                      "delta": {
+                        "type": "arguments_delta",
+                        "arguments": "{\"command\":\"ls -la /workspace\"}"
+                      },
+                      "event_type": "step.delta"
+                    }
+                    """),
+                BuildEvent("step.stop", """
+                    {
+                      "index": 0,
+                      "event_type": "step.stop"
+                    }
+                    """),
+                BuildEvent("interaction.completed", """
+                    {
+                      "interaction": {
+                        "id": "interaction-stream-arguments-delta",
+                        "status": "requires_action",
+                        "usage": {
+                          "total_tokens": 77,
+                          "total_input_tokens": 60,
+                          "total_output_tokens": 17
+                        },
+                        "model": "gemini-3-flash-preview"
+                      },
+                      "event_type": "interaction.completed"
+                    }
+                    """),
+                BuildEvent("done", "[DONE]"))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "List files")]));
+
+        var functionCall = Assert.Single(AllContents(updates).OfType<FunctionCallContent>());
+        Assert.Equal("call-arguments-delta", functionCall.CallId);
+        Assert.Equal("RunBashCommand", functionCall.Name);
+        Assert.Equal("ls -la /workspace", functionCall.Arguments!["command"]?.ToString());
+    }
+
+    [Fact]
     public async Task GetStreamingResponseAsync_GeminiBuiltInToolStream_EmitsInformationalToolContent_AndToolTelemetry()
     {
         var activities = new List<Activity>();

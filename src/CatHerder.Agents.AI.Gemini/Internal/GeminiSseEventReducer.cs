@@ -114,7 +114,7 @@ internal sealed class GeminiSseEventReducer
             return;
         }
 
-        _contentByIndex[index] = new InFlightContent(type)
+        var content = new InFlightContent(type)
         {
             Id = step?["id"]?.GetValue<string>(),
             Name = step?["name"]?.GetValue<string>(),
@@ -122,6 +122,7 @@ internal sealed class GeminiSseEventReducer
             Arguments = step?["arguments"]?.DeepClone(),
             Payload = step is null ? null : (JsonObject)step.DeepClone(),
         };
+        _contentByIndex[index] = content;
 
         if (type == "model_output")
         {
@@ -132,9 +133,13 @@ internal sealed class GeminiSseEventReducer
             EmitThoughtSummary(step, updates);
         }
 
-        EmitFunctionCallIfReady(_contentByIndex[index], updates);
-        EmitBuiltInToolCallIfReady(_contentByIndex[index], updates);
-        EmitBuiltInToolResultIfReady(_contentByIndex[index], updates);
+        if (type != "function_call" || !IsEmptyObject(content.Arguments))
+        {
+            EmitFunctionCallIfReady(content, updates);
+        }
+
+        EmitBuiltInToolCallIfReady(content, updates);
+        EmitBuiltInToolResultIfReady(content, updates);
     }
 
     private void HandleStepDelta(JsonObject? payload, List<ChatResponseUpdate> updates)
@@ -174,13 +179,13 @@ internal sealed class GeminiSseEventReducer
 
             case "arguments":
                 content.Type = "function_call";
-                var argumentsDelta = delta["partial_arguments"]?.GetValue<string>()
-                    ?? delta["arguments_delta"]?.GetValue<string>();
-                if (!string.IsNullOrEmpty(argumentsDelta))
-                {
-                    content.ArgumentsJsonBuilder ??= new StringBuilder();
-                    content.ArgumentsJsonBuilder.Append(argumentsDelta);
-                }
+                AppendArgumentsDelta(content, delta);
+
+                break;
+
+            case "arguments_delta":
+                content.Type = "function_call";
+                AppendArgumentsDelta(content, delta);
 
                 break;
 
@@ -308,7 +313,7 @@ internal sealed class GeminiSseEventReducer
 
     private JsonNode? GetFunctionArguments(InFlightContent content)
     {
-        if (content.Arguments is not null)
+        if (content.ArgumentsJsonBuilder is not { Length: > 0 } && content.Arguments is not null)
         {
             return content.Arguments;
         }
@@ -328,6 +333,21 @@ internal sealed class GeminiSseEventReducer
             _logger?.LogDebug(ex, "Ignoring incomplete Gemini streamed function-call arguments.");
             return null;
         }
+    }
+
+    private static void AppendArgumentsDelta(InFlightContent content, JsonObject delta)
+    {
+        var argumentsDelta = TryGetString(delta, "partial_arguments")
+            ?? TryGetString(delta, "arguments_delta")
+            ?? TryGetString(delta, "arguments");
+        if (string.IsNullOrEmpty(argumentsDelta))
+        {
+            return;
+        }
+
+        content.Arguments = null;
+        content.ArgumentsJsonBuilder ??= new StringBuilder();
+        content.ArgumentsJsonBuilder.Append(argumentsDelta);
     }
 
     private void EmitBuiltInToolCallIfReady(InFlightContent content, List<ChatResponseUpdate> updates)
@@ -446,6 +466,21 @@ internal sealed class GeminiSseEventReducer
         catch
         {
             return false;
+        }
+    }
+
+    private static bool IsEmptyObject(JsonNode? node)
+        => node is JsonObject jsonObject && jsonObject.Count == 0;
+
+    private static string? TryGetString(JsonObject jsonObject, string propertyName)
+    {
+        try
+        {
+            return jsonObject[propertyName]?.GetValue<string>();
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
         }
     }
 
