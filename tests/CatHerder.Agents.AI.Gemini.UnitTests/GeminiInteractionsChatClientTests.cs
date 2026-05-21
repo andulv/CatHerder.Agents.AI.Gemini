@@ -8,6 +8,7 @@ using Microsoft.Extensions.AI;
 
 namespace CatHerder.Agents.AI.Gemini.UnitTests;
 
+[Collection(GeminiTelemetryTestCollection.Name)]
 public sealed class GeminiInteractionsChatClientTests
 {
     [Fact]
