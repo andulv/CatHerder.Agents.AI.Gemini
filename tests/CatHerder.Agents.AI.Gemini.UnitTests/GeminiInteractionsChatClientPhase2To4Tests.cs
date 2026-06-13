@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -8,7 +7,6 @@ using Microsoft.Extensions.AI;
 
 namespace CatHerder.Agents.AI.Gemini.UnitTests;
 
-[Collection(GeminiTelemetryTestCollection.Name)]
 public sealed class GeminiInteractionsChatClientPhase2To4Tests
 {
     [Fact]
@@ -236,9 +234,9 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                           "total_tokens": 12,
                           "total_input_tokens": 6,
                           "total_output_tokens": 2,
-                          "cached_input_tokens": 1,
-                          "thoughts_token_count": 3,
-                          "tool_use_prompt_token_count": 4
+                          "total_cached_tokens": 1,
+                          "total_thought_tokens": 3,
+                          "total_tool_use_tokens": 4
                         },
                         "model": "gemini-3-flash-preview"
                       },
@@ -261,10 +259,204 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
         Assert.Equal(1, usage.Details.CachedInputTokenCount);
         Assert.Equal(3, usage.Details.ReasoningTokenCount);
         Assert.NotNull(usage.Details.AdditionalCounts);
-        Assert.Equal(4, usage.Details.AdditionalCounts["tool_use_prompt_token_count"]);
+        Assert.Equal(4, usage.Details.AdditionalCounts["total_tool_use_tokens"]);
         Assert.Equal("OK.", response.Messages.Single().Text);
         Assert.Equal("interaction-stream-1", response.ConversationId);
         Assert.Equal(12, response.Usage?.TotalTokenCount);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_Throws_WhenCanonicalUsageFieldIsInvalid()
+    {
+        const string jsonResponse = """
+            {
+              "id": "interaction-invalid-usage",
+              "model": "gemini-3-flash-preview",
+              "steps": [
+                {
+                  "type": "model_output",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "ok"
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "total_tokens": "not-a-number"
+              }
+            }
+            """;
+
+        using var httpClient = CreateHttpClient(new JsonRecordingHandler(jsonResponse));
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var exception = await Assert.ThrowsAsync<GeminiProtocolException>(async () =>
+            await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]));
+
+        Assert.Contains("$.usage.total_tokens", exception.JsonPath);
+    }
+
+    [Theory]
+    [InlineData("""
+        {
+          "id": "interaction-non-object-step",
+          "model": "gemini-3-flash-preview",
+          "steps": [ "not-an-object" ]
+        }
+        """, "$.steps[0]")]
+    [InlineData("""
+        {
+          "id": "interaction-missing-step-type",
+          "model": "gemini-3-flash-preview",
+          "steps": [ { "content": [] } ]
+        }
+        """, "$.steps[0].type")]
+    [InlineData("""
+        {
+          "id": "interaction-missing-content",
+          "model": "gemini-3-flash-preview",
+          "steps": [ { "type": "model_output" } ]
+        }
+        """, "$.steps[0].content")]
+    [InlineData("""
+        {
+          "id": "interaction-non-object-content",
+          "model": "gemini-3-flash-preview",
+          "steps": [
+            {
+              "type": "model_output",
+              "content": [ "not-an-object" ]
+            }
+          ]
+        }
+        """, "$.steps[0].content[0]")]
+    [InlineData("""
+        {
+          "id": "interaction-missing-content-type",
+          "model": "gemini-3-flash-preview",
+          "steps": [
+            {
+              "type": "model_output",
+              "content": [ { "text": "ok" } ]
+            }
+          ]
+        }
+        """, "$.steps[0].content[0].type")]
+    [InlineData("""
+        {
+          "id": "interaction-missing-function-id",
+          "model": "gemini-3-flash-preview",
+          "steps": [
+            {
+              "type": "function_call",
+              "name": "get_weather",
+              "arguments": {}
+            }
+          ]
+        }
+        """, "$.steps[0].id")]
+    [InlineData("""
+        {
+          "id": "interaction-missing-function-name",
+          "model": "gemini-3-flash-preview",
+          "steps": [
+            {
+              "type": "function_call",
+              "id": "call-1",
+              "arguments": {}
+            }
+          ]
+        }
+        """, "$.steps[0].name")]
+    [InlineData("""
+        {
+          "id": "interaction-invalid-arguments",
+          "model": "gemini-3-flash-preview",
+          "steps": [
+            {
+              "type": "function_call",
+              "id": "call-1",
+              "name": "get_weather",
+              "arguments": "not-an-object"
+            }
+          ]
+        }
+        """, "$.steps[0].arguments")]
+    [InlineData("""
+        {
+          "id": "interaction-invalid-usage-shape",
+          "model": "gemini-3-flash-preview",
+          "steps": [
+            {
+              "type": "model_output",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          ],
+          "usage": "not-an-object"
+        }
+        """, "$.usage")]
+    public async Task GetResponseAsync_ThrowsGeminiProtocolException_ForMalformedCurrentSchema(string jsonResponse, string jsonPath)
+    {
+        using var httpClient = CreateHttpClient(new JsonRecordingHandler(jsonResponse));
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var exception = await Assert.ThrowsAsync<GeminiProtocolException>(async () =>
+            await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]));
+
+        var expectedOperation = jsonPath.StartsWith("$.usage", StringComparison.Ordinal)
+            ? "UsageMapping"
+            : nameof(GeminiInteractionsChatClient.GetResponseAsync);
+        Assert.Equal(expectedOperation, exception.OperationName);
+        Assert.Equal(jsonPath, exception.JsonPath);
+        Assert.NotEmpty(exception.Message);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_PreservesZeroCanonicalUsageFields()
+    {
+        const string jsonResponse = """
+            {
+              "id": "interaction-zero-usage",
+              "model": "gemini-3-flash-preview",
+              "steps": [
+                {
+                  "type": "model_output",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "ok"
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+                "total_cached_tokens": 0,
+                "total_thought_tokens": 0
+              }
+            }
+            """;
+
+        using var httpClient = CreateHttpClient(new JsonRecordingHandler(jsonResponse));
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]);
+
+        Assert.NotNull(response.Usage);
+        Assert.Equal(0, response.Usage.InputTokenCount);
+        Assert.Equal(0, response.Usage.OutputTokenCount);
+        Assert.Equal(0, response.Usage.TotalTokenCount);
+        Assert.Equal(0, response.Usage.CachedInputTokenCount);
+        Assert.Equal(0, response.Usage.ReasoningTokenCount);
     }
 
     [Fact]
@@ -418,8 +610,6 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     [Fact]
     public async Task GetStreamingResponseAsync_GeminiBuiltInToolStream_EmitsInformationalToolContent_AndToolTelemetry()
     {
-        var activities = new List<Activity>();
-        using var listener = CreateAgentActivityListener(activities);
         var handler = new StreamingRequestHandler(
             CreateSseResponse(CreateSsePayload(
                 BuildEvent("interaction.created", """
@@ -532,12 +722,6 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
         Assert.Equal("search-456", functionResult.CallId);
         Assert.Contains("rendered_content", functionResult.Result?.ToString());
         Assert.Equal("Try these places.", response.Messages.Single().Text);
-
-        var activity = Assert.Single(activities, activity => Equals(activity.GetTagItem("gen_ai.tool.call.id"), "search-456"));
-        Assert.Equal("execute_tool google_search", activity.OperationName);
-        Assert.Equal("search-456", activity.GetTagItem("gen_ai.tool.call.id"));
-        Assert.Contains("restaurants bergen", activity.GetTagItem("gen_ai.tool.call.arguments")?.ToString());
-        Assert.Contains("rendered_content", activity.GetTagItem("gen_ai.tool.call.result")?.ToString());
     }
 
     [Fact]
@@ -704,7 +888,141 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     }
 
     [Fact]
-    public async Task GetStreamingResponseAsync_FallsBack_WhenServerReturnsJson()
+    public async Task ErrorContent_StreamingStatusError_MapsProviderCodeAndDetails()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("interaction.status_update", """
+                    {
+                      "status": "error",
+                      "error": {
+                        "code": "RESOURCE_EXHAUSTED",
+                        "message": "Quota exceeded.",
+                        "status": "RESOURCE_EXHAUSTED"
+                      },
+                      "event_type": "interaction.status_update"
+                    }
+                    """),
+                BuildEvent("done", "[DONE]"))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")]));
+
+        var error = Assert.Single(AllContents(updates).OfType<ErrorContent>());
+        Assert.Equal("Quota exceeded.", error.Message);
+        Assert.Equal("RESOURCE_EXHAUSTED", error.ErrorCode);
+        Assert.Contains("RESOURCE_EXHAUSTED", error.Details?.ToString());
+    }
+
+    [Fact]
+    public async Task GetStreamingResponseAsync_CompletedStatus_MapsStopFinishReason()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("interaction.created", """
+                    {
+                      "interaction": {
+                        "id": "interaction-stream-finish",
+                        "status": "in_progress",
+                        "model": "gemini-3-flash-preview"
+                      },
+                      "event_type": "interaction.created"
+                    }
+                    """),
+                BuildEvent("interaction.completed", """
+                    {
+                      "interaction": {
+                        "id": "interaction-stream-finish",
+                        "status": "completed",
+                        "usage": {
+                          "total_tokens": 1
+                        },
+                        "model": "gemini-3-flash-preview"
+                      },
+                      "event_type": "interaction.completed"
+                    }
+                    """),
+                BuildEvent("done", "[DONE]"))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")]));
+
+        Assert.Contains(updates, update => update.FinishReason == ChatFinishReason.Stop);
+    }
+
+    [Theory]
+    [InlineData("event: step.delta\ndata: {\n\n", "step.delta", "$")]
+    [InlineData("event: step.delta\ndata: []\n\n", "step.delta", "$")]
+    [InlineData("data: {\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"OK\"}}\n\n", null, "event")]
+    [InlineData("event: step.start\ndata: {\"step\":{\"type\":\"model_output\"}}\n\n", "step.start", "$.index")]
+    [InlineData("event: step.delta\ndata: {\"index\":\"zero\",\"delta\":{\"type\":\"text\",\"text\":\"OK\"}}\n\n", "step.delta", "$.index")]
+    [InlineData("event: step.delta\ndata: {\"index\":0,\"delta\":{\"text\":\"OK\"}}\n\n", "step.delta", "$.delta.type")]
+    [InlineData("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments\"}}\n\n", "step.delta", "$.delta.partial_arguments")]
+    public async Task GeminiSse_MalformedKnownFrame_ThrowsGeminiProtocolException(string ssePayload, string? eventType, string jsonPath)
+    {
+        var handler = new StreamingRequestHandler(CreateSseResponse(ssePayload));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var exception = await Assert.ThrowsAsync<GeminiProtocolException>(async () =>
+            await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")])));
+
+        Assert.Equal(nameof(GeminiInteractionsChatClient.GetStreamingResponseAsync), exception.OperationName);
+        Assert.Equal(eventType, exception.SseEventType);
+        Assert.Equal(jsonPath, exception.JsonPath);
+    }
+
+    [Fact]
+    public async Task GeminiSse_IncompleteFunctionCallArguments_ThrowsGeminiProtocolException()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("step.start", """
+                    {
+                      "index": 0,
+                      "step": {
+                        "type": "function_call",
+                        "id": "call-1",
+                        "name": "get_weather"
+                      },
+                      "event_type": "step.start"
+                    }
+                    """),
+                BuildEvent("step.delta", """
+                    {
+                      "index": 0,
+                      "delta": {
+                        "type": "arguments",
+                        "partial_arguments": "{\"location\":"
+                      },
+                      "event_type": "step.delta"
+                    }
+                    """),
+                BuildEvent("step.stop", """
+                    {
+                      "index": 0,
+                      "event_type": "step.stop"
+                    }
+                    """))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var exception = await Assert.ThrowsAsync<GeminiProtocolException>(async () =>
+            await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Weather?")])));
+
+        Assert.Equal(nameof(GeminiInteractionsChatClient.GetStreamingResponseAsync), exception.OperationName);
+        Assert.Equal("step.stop", exception.SseEventType);
+        Assert.Equal("$.delta.arguments", exception.JsonPath);
+    }
+
+    [Fact]
+    public async Task StreamingFallback_ServerReturnsJson_ThrowsByDefault()
     {
         const string jsonResponse = """
             {
@@ -722,28 +1040,25 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
                 }
               ],
               "usage": {
-                "input_tokens": 2,
-                "output_tokens": 2,
+                "total_input_tokens": 2,
+                "total_output_tokens": 2,
                 "total_tokens": 4
               }
             }
             """;
 
         var handler = new StreamingRequestHandler(
-            CreateJsonResponse(jsonResponse),
             CreateJsonResponse(jsonResponse));
 
         using var httpClient = CreateHttpClient(handler);
         using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
-        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")]));
-        var response = updates.ToChatResponse();
+        var exception = await Assert.ThrowsAsync<GeminiSseNegotiationException>(async () =>
+            await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")])));
 
-        Assert.Equal(2, handler.RequestBodies.Count);
-        Assert.Contains("\"stream\":true", handler.RequestBodies[0]);
-        Assert.DoesNotContain("\"stream\":true", handler.RequestBodies[1]);
-        Assert.Equal("fallback ok", response.Messages.Single().Text);
-        Assert.Equal(4, response.Usage?.TotalTokenCount);
+        Assert.Contains("Content-Type", exception.Message);
+        var requestBody = Assert.Single(handler.RequestBodies);
+        Assert.Contains("\"stream\":true", requestBody);
     }
 
     [Fact]
@@ -810,20 +1125,6 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     {
         Assert.False(string.IsNullOrWhiteSpace(handler.LastRequestBody));
         return JsonNode.Parse(handler.LastRequestBody!)!.AsObject();
-    }
-
-    private static ActivityListener CreateAgentActivityListener(List<Activity> activities)
-    {
-      var listener = new ActivityListener
-      {
-        ShouldListenTo = source => source.Name == "CatHerder.Agents.AI.Gemini",
-        Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-        SampleUsingParentId = (ref ActivityCreationOptions<string> _) => ActivitySamplingResult.AllDataAndRecorded,
-        ActivityStopped = activity => activities.Add(activity),
-      };
-
-      ActivitySource.AddActivityListener(listener);
-      return listener;
     }
 
     private static async Task<List<ChatResponseUpdate>> CollectUpdatesAsync(IAsyncEnumerable<ChatResponseUpdate> updates)

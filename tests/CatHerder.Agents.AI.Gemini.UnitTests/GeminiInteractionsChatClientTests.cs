@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Net;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -8,7 +8,6 @@ using Microsoft.Extensions.AI;
 
 namespace CatHerder.Agents.AI.Gemini.UnitTests;
 
-[Collection(GeminiTelemetryTestCollection.Name)]
 public sealed class GeminiInteractionsChatClientTests
 {
     [Fact]
@@ -314,7 +313,7 @@ public sealed class GeminiInteractionsChatClientTests
         using var httpClient = CreateHttpClient(handler);
         using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        var ex = await Assert.ThrowsAsync<GeminiProtocolException>(async () =>
             await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]));
 
         Assert.Contains("steps", ex.Message);
@@ -353,7 +352,24 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
-    public async Task GetResponseAsync_MapsGeminiBuiltInToolSteps_AndEmitsToolTelemetry()
+    public async Task ResponseFormat_UnsupportedVariant_ThrowsNotSupportedException()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        var unsupportedFormat = (ChatResponseFormat)RuntimeHelpers.GetUninitializedObject(typeof(ChatResponseFormat));
+
+        var exception = await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await client.GetResponseAsync(
+                [new ChatMessage(ChatRole.User, "Hello")],
+                new ChatOptions { ResponseFormat = unsupportedFormat }));
+
+        Assert.Contains("response format", exception.Message);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_MapsGeminiBuiltInToolSteps_AsInformationalMeaiContent()
     {
         var responseJson = JsonSerializer.Serialize(new
         {
@@ -399,8 +415,6 @@ public sealed class GeminiInteractionsChatClientTests
             },
         });
 
-        var activities = new List<Activity>();
-        using var listener = CreateAgentActivityListener(activities);
         var handler = new RecordingHandler(HttpStatusCode.OK, responseJson);
         using var httpClient = CreateHttpClient(handler);
         using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
@@ -420,13 +434,6 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Equal("search-123", functionResult.CallId);
         Assert.Contains("rendered_content", functionResult.Result?.ToString());
         Assert.Contains("Example Weather", functionResult.Result?.ToString());
-
-        var activity = Assert.Single(activities);
-        Assert.Equal("execute_tool google_search", activity.OperationName);
-        Assert.Equal("google_search", activity.GetTagItem("gen_ai.tool.name"));
-        Assert.Equal("search-123", activity.GetTagItem("gen_ai.tool.call.id"));
-        Assert.Contains("weather oslo", activity.GetTagItem("gen_ai.tool.call.arguments")?.ToString());
-        Assert.Contains("rendered_content", activity.GetTagItem("gen_ai.tool.call.result")?.ToString());
     }
 
     [Fact]
@@ -471,20 +478,6 @@ public sealed class GeminiInteractionsChatClientTests
     {
         Assert.False(string.IsNullOrWhiteSpace(handler.LastRequestBody));
         return JsonNode.Parse(handler.LastRequestBody!)!.AsObject();
-    }
-
-    private static ActivityListener CreateAgentActivityListener(List<Activity> activities)
-    {
-        var listener = new ActivityListener
-        {
-            ShouldListenTo = source => source.Name == "CatHerder.Agents.AI.Gemini",
-            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-            SampleUsingParentId = (ref ActivityCreationOptions<string> _) => ActivitySamplingResult.AllDataAndRecorded,
-            ActivityStopped = activity => activities.Add(activity),
-        };
-
-        ActivitySource.AddActivityListener(listener);
-        return listener;
     }
 
     private sealed class RecordingHandler : HttpMessageHandler
@@ -547,4 +540,5 @@ public sealed class GeminiInteractionsChatClientTests
             };
         }
     }
+
 }

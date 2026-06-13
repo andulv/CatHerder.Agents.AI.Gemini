@@ -5,27 +5,6 @@ namespace CatHerder.Agents.AI.Gemini;
 
 internal static class GeminiUsageMapper
 {
-    private static readonly HashSet<string> CanonicalFields = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "cached_content_token_count",
-        "cached_input_tokens",
-        "cachedContentTokenCount",
-        "cache_read_input_tokens",
-        "candidates_token_count",
-        "input_tokens",
-        "output_tokens",
-        "prompt_token_count",
-        "reasoning_tokens",
-        "thinking_tokens",
-        "thought_tokens",
-        "thoughts_token_count",
-        "thoughts_tokens",
-        "total_input_tokens",
-        "total_output_tokens",
-        "total_token_count",
-        "total_tokens",
-    };
-
     public static UsageDetails? Map(JsonNode? usageNode)
     {
         if (usageNode is null)
@@ -33,28 +12,24 @@ internal static class GeminiUsageMapper
             return null;
         }
 
+        if (usageNode is not JsonObject usageObject)
+        {
+            throw new GeminiProtocolException(
+                "Gemini interaction usage must be a JSON object.",
+                operationName: "UsageMapping",
+                jsonPath: "$.usage");
+        }
+
         var usage = new UsageDetails
         {
-            InputTokenCount = GetInt(usageNode, "total_input_tokens") ?? GetInt(usageNode, "input_tokens") ?? GetInt(usageNode, "prompt_token_count"),
-            OutputTokenCount = GetInt(usageNode, "total_output_tokens") ?? GetInt(usageNode, "output_tokens") ?? GetInt(usageNode, "candidates_token_count"),
-            TotalTokenCount = GetInt(usageNode, "total_tokens") ?? GetInt(usageNode, "total_token_count"),
-            CachedInputTokenCount = GetInt(usageNode, "cached_input_tokens") ?? GetInt(usageNode, "cache_read_input_tokens") ?? GetInt(usageNode, "cached_content_token_count") ?? GetInt(usageNode, "cachedContentTokenCount"),
-            ReasoningTokenCount = GetInt(usageNode, "reasoning_tokens") ?? GetInt(usageNode, "thoughts_token_count") ?? GetInt(usageNode, "thoughts_tokens") ?? GetInt(usageNode, "thought_tokens") ?? GetInt(usageNode, "thinking_tokens"),
+            InputTokenCount = GetCanonicalTokenCount(usageObject, "total_input_tokens"),
+            OutputTokenCount = GetCanonicalTokenCount(usageObject, "total_output_tokens"),
+            TotalTokenCount = GetCanonicalTokenCount(usageObject, "total_tokens"),
+            CachedInputTokenCount = GetCanonicalTokenCount(usageObject, "total_cached_tokens"),
+            ReasoningTokenCount = GetCanonicalTokenCount(usageObject, "total_thought_tokens"),
         };
 
-        if (usageNode is JsonObject usageObject)
-        {
-            foreach (var property in usageObject)
-            {
-                if (CanonicalFields.Contains(property.Key) || !TryGetInt(property.Value, out var count))
-                {
-                    continue;
-                }
-
-                usage.AdditionalCounts ??= [];
-                usage.AdditionalCounts[property.Key] = count;
-            }
-        }
+        AddAdditionalCount(usage, usageObject, "total_tool_use_tokens");
 
         return usage.InputTokenCount is null
             && usage.OutputTokenCount is null
@@ -66,28 +41,36 @@ internal static class GeminiUsageMapper
                 : usage;
     }
 
-    private static int? GetInt(JsonNode node, string property)
+    private static void AddAdditionalCount(UsageDetails usage, JsonObject usageObject, string property)
     {
-        var value = node[property];
-        return TryGetInt(value, out var parsed) ? parsed : null;
+        var count = GetCanonicalTokenCount(usageObject, property);
+        if (count is null)
+        {
+            return;
+        }
+
+        usage.AdditionalCounts ??= [];
+        usage.AdditionalCounts[property] = count.Value;
     }
 
-    private static bool TryGetInt(JsonNode? value, out int parsed)
+    private static int? GetCanonicalTokenCount(JsonObject usageObject, string property)
     {
-        parsed = default;
-        if (value is null)
+        if (!usageObject.TryGetPropertyValue(property, out var value) || value is null)
         {
-            return false;
+            return null;
         }
 
         try
         {
-            parsed = value.GetValue<int>();
-            return true;
+            return value.GetValue<int>();
         }
-        catch
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException)
         {
-            return false;
+            throw new GeminiProtocolException(
+                $"Gemini interaction usage field '{property}' must be an integer.",
+                operationName: "UsageMapping",
+                jsonPath: $"$.usage.{property}",
+                innerException: ex);
         }
     }
 }

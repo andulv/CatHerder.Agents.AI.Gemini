@@ -26,7 +26,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     private readonly ILogger? _logger;
     private readonly ChatClientMetadata _metadata;
     private readonly bool _disposeHttpClient;
-    private int _streamingFallbackLogged;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -93,14 +92,33 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 responseBody);
         }
 
-        var interaction = JsonNode.Parse(responseBody)!.AsObject();
-        var chatResponse = MapInteractionToChatResponse(interaction, _logger);
-
-        using var toolTelemetry = new GeminiBuiltInToolTelemetry();
-        foreach (var message in chatResponse.Messages)
+        JsonObject interaction;
+        try
         {
-            toolTelemetry.Observe(message.Contents);
+            interaction = JsonNode.Parse(responseBody) as JsonObject
+                ?? throw new GeminiProtocolException(
+                    "Gemini Interactions response body must be a JSON object.",
+                    operationName: nameof(GetResponseAsync),
+                    jsonPath: "$");
         }
+        catch (JsonException ex)
+        {
+            throw new GeminiProtocolException(
+                "Gemini Interactions response body was not valid JSON.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: "$",
+                innerException: ex);
+        }
+        catch (InvalidOperationException ex) when (ex is not GeminiProtocolException)
+        {
+            throw new GeminiProtocolException(
+                "Gemini Interactions response body must be a JSON object.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: "$",
+                innerException: ex);
+        }
+
+        var chatResponse = MapInteractionToChatResponse(interaction, _logger);
 
         return chatResponse;
     }
@@ -111,49 +129,24 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        using var toolTelemetry = new GeminiBuiltInToolTelemetry();
         var sseEnumerator = StreamWithSseAsync(messages, options, cancellationToken).GetAsyncEnumerator(cancellationToken);
-        GeminiSseNegotiationException? negotiationFailure = null;
 
         try
         {
             while (true)
             {
-                bool hasNext;
-                try
-                {
-                    hasNext = await sseEnumerator.MoveNextAsync();
-                }
-                catch (GeminiSseNegotiationException ex) when (!cancellationToken.IsCancellationRequested)
-                {
-                    negotiationFailure = ex;
-                    break;
-                }
-
+                var hasNext = await sseEnumerator.MoveNextAsync();
                 if (!hasNext)
                 {
                     break;
                 }
 
-                toolTelemetry.Observe(sseEnumerator.Current.Contents);
                 yield return sseEnumerator.Current;
             }
         }
         finally
         {
             await sseEnumerator.DisposeAsync();
-        }
-
-        if (negotiationFailure is null)
-        {
-            yield break;
-        }
-
-        LogStreamingFallback(negotiationFailure.Message);
-        var fallbackResponse = await GetResponseAsync(messages, options, cancellationToken);
-        foreach (var update in fallbackResponse.ToChatResponseUpdates())
-        {
-            yield return update;
         }
     }
 
@@ -177,14 +170,18 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            throw new GeminiSseNegotiationException("Gemini Interactions SSE negotiation failed before response headers were received.", ex);
+            throw new GeminiSseNegotiationException(
+                "Gemini Interactions SSE negotiation failed before response headers were received.",
+                innerException: ex);
         }
 
         using (response)
         {
             if (!response.IsSuccessStatusCode)
             {
-                throw new GeminiSseNegotiationException($"Gemini Interactions SSE negotiation failed with HTTP {(int)response.StatusCode} ({response.StatusCode}).");
+                throw new GeminiSseNegotiationException(
+                    $"Gemini Interactions SSE negotiation failed with HTTP {(int)response.StatusCode} ({response.StatusCode}).",
+                    response.StatusCode);
             }
 
             if (!IsSseResponse(response))
@@ -685,7 +682,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 MimeType = "application/json",
                 Schema = json.Schema,
             },
-            _ => null,
+            _ => throw new NotSupportedException($"Gemini Interactions does not support response format '{responseFormat.GetType().Name}'."),
         };
     }
 
@@ -710,7 +707,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             {
                 if (tool is not AIFunctionDeclaration function)
                 {
-                    continue;
+                    throw new NotSupportedException($"Gemini Interactions does not support chat tool type '{tool.GetType().Name}'.");
                 }
 
                 tools.Add(new GeminiInteractionTool
@@ -753,23 +750,35 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     {
         var interactionId = interaction["id"]?.GetValue<string>();
         var modelId = interaction["model"]?.GetValue<string>();
+        var status = interaction["status"]?.GetValue<string>();
         if (interaction["steps"] is not JsonArray steps)
         {
-            throw new InvalidOperationException(
-                $"Gemini Interactions response did not contain a 'steps' array. This client only supports the {ApiRevisionHeaderValue} steps schema.");
+            throw new GeminiProtocolException(
+                $"Gemini Interactions response did not contain a 'steps' array. This client only supports the {ApiRevisionHeaderValue} steps schema.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: "$.steps",
+                responseId: interactionId,
+                modelId: modelId);
         }
 
         var textParts = new List<string>();
         var additionalContents = new List<AIContent>();
 
+        var stepIndex = 0;
         foreach (var step in steps)
         {
             if (step is not JsonObject stepObject)
             {
-                continue;
+                throw new GeminiProtocolException(
+                    "Gemini Interactions response step must be a JSON object.",
+                    operationName: nameof(GetResponseAsync),
+                    jsonPath: $"$.steps[{stepIndex}]",
+                    responseId: interactionId,
+                    modelId: modelId);
             }
 
-            MapStep(stepObject, textParts, additionalContents, logger);
+            MapStep(stepObject, textParts, additionalContents, logger, $"$.steps[{stepIndex}]", interactionId, modelId);
+            stepIndex++;
         }
 
         var responseText = string.Join("\n", textParts);
@@ -781,10 +790,11 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         {
             ResponseId = interactionId,
             ModelId = modelId,
+            FinishReason = MapFinishReason(status),
         };
 
         // Map usage
-        chatResponse.Usage = MapUsageDetails(interaction["usage"]);
+        chatResponse.Usage = GeminiUsageMapper.Map(interaction["usage"]);
 
         if (!string.IsNullOrEmpty(interactionId))
         {
@@ -801,23 +811,26 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         return chatResponse;
     }
 
-    private static void MapStep(JsonObject step, List<string> textParts, List<AIContent> additionalContents, ILogger? logger)
+    private static void MapStep(
+        JsonObject step,
+        List<string> textParts,
+        List<AIContent> additionalContents,
+        ILogger? logger,
+        string stepPath,
+        string? interactionId,
+        string? modelId)
     {
-        var type = step["type"]?.GetValue<string>();
-        if (string.IsNullOrWhiteSpace(type))
-        {
-            return;
-        }
+        var type = GetRequiredString(step, "type", $"{stepPath}.type", interactionId, modelId);
 
         if (type == "model_output")
         {
-            MapModelOutputStep(step, textParts, additionalContents, logger);
+            MapModelOutputStep(step, textParts, additionalContents, logger, stepPath, interactionId, modelId);
             return;
         }
 
         if (type == "function_call")
         {
-            AddFunctionCallContent(step, additionalContents);
+            AddFunctionCallContent(step, additionalContents, stepPath, interactionId, modelId);
             return;
         }
 
@@ -839,24 +852,43 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
     }
 
-    private static void MapModelOutputStep(JsonObject step, List<string> textParts, List<AIContent> additionalContents, ILogger? logger)
+    private static void MapModelOutputStep(
+        JsonObject step,
+        List<string> textParts,
+        List<AIContent> additionalContents,
+        ILogger? logger,
+        string stepPath,
+        string? interactionId,
+        string? modelId)
     {
         if (step["content"] is not JsonArray contentBlocks)
         {
-            return;
+            throw new GeminiProtocolException(
+                "Gemini model_output step must contain a 'content' array.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: $"{stepPath}.content",
+                responseId: interactionId,
+                modelId: modelId);
         }
 
-        foreach (var contentBlock in contentBlocks)
+        for (var contentIndex = 0; contentIndex < contentBlocks.Count; contentIndex++)
         {
+            var contentBlock = contentBlocks[contentIndex];
             if (contentBlock is not JsonObject contentObject)
             {
-                continue;
+                throw new GeminiProtocolException(
+                    "Gemini model_output content block must be a JSON object.",
+                    operationName: nameof(GetResponseAsync),
+                    jsonPath: $"{stepPath}.content[{contentIndex}]",
+                    responseId: interactionId,
+                    modelId: modelId);
             }
 
-            var type = contentObject["type"]?.GetValue<string>();
+            var contentPath = $"{stepPath}.content[{contentIndex}]";
+            var type = GetRequiredString(contentObject, "type", $"{contentPath}.type", interactionId, modelId);
             if (type == "text")
             {
-                var text = contentObject["text"]?.GetValue<string>();
+                var text = GetRequiredString(contentObject, "text", $"{contentPath}.text", interactionId, modelId);
                 if (!string.IsNullOrEmpty(text))
                 {
                     textParts.Add(text);
@@ -867,7 +899,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
             if (type == "function_call")
             {
-                AddFunctionCallContent(contentObject, additionalContents);
+                AddFunctionCallContent(contentObject, additionalContents, contentPath, interactionId, modelId);
                 continue;
             }
 
@@ -890,24 +922,95 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
     }
 
-    private static void AddFunctionCallContent(JsonObject payload, List<AIContent> additionalContents)
+    private static void AddFunctionCallContent(
+        JsonObject payload,
+        List<AIContent> additionalContents,
+        string payloadPath,
+        string? interactionId,
+        string? modelId)
     {
-        var callId = payload["id"]?.GetValue<string>();
-        var name = payload["name"]?.GetValue<string>();
+        var callId = GetRequiredString(payload, "id", $"{payloadPath}.id", interactionId, modelId);
+        var name = GetRequiredString(payload, "name", $"{payloadPath}.name", interactionId, modelId);
         var argumentsNode = payload["arguments"];
-        if (string.IsNullOrWhiteSpace(callId) || string.IsNullOrWhiteSpace(name))
+        if (argumentsNode is null)
         {
-            return;
+            throw new GeminiProtocolException(
+                $"Gemini function call '{name}' has null arguments.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: $"{payloadPath}.arguments",
+                responseId: interactionId,
+                modelId: modelId);
+        }
+
+        if (argumentsNode is not JsonObject)
+        {
+            throw new GeminiProtocolException(
+                $"Gemini function call '{name}' arguments must be a JSON object.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: $"{payloadPath}.arguments",
+                responseId: interactionId,
+                modelId: modelId);
         }
 
         RememberFunctionName(callId, name);
-        var argumentsJson = argumentsNode?.ToJsonString()
-            ?? throw new InvalidOperationException($"Gemini function call '{name}' has null arguments.");
-        additionalContents.Add(FunctionCallContent.CreateFromParsedArguments(
-            argumentsJson,
-            callId,
-            name,
-            static json => JsonSerializer.Deserialize<Dictionary<string, object?>>(json)));
+        try
+        {
+            var argumentsJson = argumentsNode.ToJsonString();
+            additionalContents.Add(FunctionCallContent.CreateFromParsedArguments(
+                argumentsJson,
+                callId,
+                name,
+                static json => JsonSerializer.Deserialize<Dictionary<string, object?>>(json)));
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            throw new GeminiProtocolException(
+                $"Gemini function call '{name}' has invalid arguments.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: $"{payloadPath}.arguments",
+                responseId: interactionId,
+                modelId: modelId,
+                innerException: ex);
+        }
+    }
+
+    private static string GetRequiredString(JsonObject payload, string propertyName, string jsonPath, string? responseId, string? modelId)
+    {
+        if (!payload.TryGetPropertyValue(propertyName, out var node) || node is null)
+        {
+            throw new GeminiProtocolException(
+                $"Gemini response is missing required '{propertyName}'.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: jsonPath,
+                responseId: responseId,
+                modelId: modelId);
+        }
+
+        try
+        {
+            var value = node.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException)
+        {
+            throw new GeminiProtocolException(
+                $"Gemini response field '{propertyName}' must be a string.",
+                operationName: nameof(GetResponseAsync),
+                jsonPath: jsonPath,
+                responseId: responseId,
+                modelId: modelId,
+                innerException: ex);
+        }
+
+        throw new GeminiProtocolException(
+            $"Gemini response field '{propertyName}' must not be empty.",
+            operationName: nameof(GetResponseAsync),
+            jsonPath: jsonPath,
+            responseId: responseId,
+            modelId: modelId);
     }
 
     private static void LogThoughtSummary(JsonObject thought, ILogger? logger)
@@ -933,8 +1036,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
     }
 
-    private static UsageDetails? MapUsageDetails(JsonNode? usageNode)
-        => GeminiUsageMapper.Map(usageNode);
 
     private IEnumerable<ChatResponseUpdate> ProcessSseFrame(GeminiSseEventReducer reducer, string? eventType, IReadOnlyList<string> dataLines)
     {
@@ -957,15 +1058,30 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 payload = JsonNode.Parse(payloadText) as JsonObject;
                 if (payload is null)
                 {
-                    _logger?.LogDebug("Ignoring Gemini SSE frame {EventType} because the payload was not a JSON object.", eventType);
-                    return [];
+                    throw new GeminiProtocolException(
+                        "Gemini SSE frame payload must be a JSON object.",
+                        operationName: nameof(GetStreamingResponseAsync),
+                        sseEventType: eventType,
+                        jsonPath: "$");
                 }
             }
             catch (JsonException ex)
             {
-                _logger?.LogDebug(ex, "Ignoring malformed Gemini SSE frame for event {EventType}.", eventType);
-                return [];
+                throw new GeminiProtocolException(
+                    "Gemini SSE frame payload was not valid JSON.",
+                    operationName: nameof(GetStreamingResponseAsync),
+                    sseEventType: eventType,
+                    jsonPath: "$",
+                    innerException: ex);
             }
+        }
+
+        if (string.IsNullOrWhiteSpace(eventType))
+        {
+            throw new GeminiProtocolException(
+                "Gemini SSE frame had data but no event type.",
+                operationName: nameof(GetStreamingResponseAsync),
+                jsonPath: "event");
         }
 
         var updates = reducer.Reduce(eventType ?? string.Empty, payload);
@@ -985,14 +1101,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             StringComparison.OrdinalIgnoreCase);
     }
 
-    private void LogStreamingFallback(string reason)
-    {
-        if (Interlocked.Exchange(ref _streamingFallbackLogged, 1) == 0)
-        {
-            _logger?.LogWarning("Falling back to non-streaming Gemini response path because SSE negotiation failed: {Reason}", reason);
-        }
-    }
-
     private static GeminiApiError? TryParseGeminiError(string responseBody)
     {
         try
@@ -1007,7 +1115,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             var status = TryGetString(error["status"]);
             return new GeminiApiError(code, message, status);
         }
-        catch
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
             return null;
         }
@@ -1048,22 +1156,22 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         };
     }
 
+    internal static ChatFinishReason? MapFinishReason(string? status)
+    {
+        return status?.ToLowerInvariant() switch
+        {
+            null or "" => null,
+            "completed" => ChatFinishReason.Stop,
+            "requires_action" => ChatFinishReason.ToolCalls,
+            "max_tokens" or "truncated" or "incomplete" => ChatFinishReason.Length,
+            "content_filter" or "safety" or "blocked" => ChatFinishReason.ContentFilter,
+            _ => null,
+        };
+    }
+
     private sealed record GeminiApiError(string? Code, string? Message, string? Status);
 
     private sealed record NormalizedMessages(string SystemInstruction, IReadOnlyList<ChatMessage> InputTurns);
-
-    private sealed class GeminiSseNegotiationException : Exception
-    {
-        public GeminiSseNegotiationException(string message)
-            : base(message)
-        {
-        }
-
-        public GeminiSseNegotiationException(string message, Exception innerException)
-            : base(message, innerException)
-        {
-        }
-    }
 
     /// <inheritdoc />
     public object? GetService(Type serviceType, object? serviceKey = null)

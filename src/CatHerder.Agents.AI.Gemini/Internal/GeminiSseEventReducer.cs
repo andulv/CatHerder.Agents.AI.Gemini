@@ -28,7 +28,7 @@ internal sealed class GeminiSseEventReducer
         switch (eventType)
         {
             case "interaction.created":
-                CaptureInteractionMetadata(payload?["interaction"] as JsonObject);
+                CaptureInteractionMetadata(RequireObject(RequirePayload(payload, eventType), "interaction", eventType, "$.interaction"));
                 break;
 
             case "interaction.status_update":
@@ -64,12 +64,7 @@ internal sealed class GeminiSseEventReducer
 
     private void CaptureInteractionMetadata(JsonObject? interaction)
     {
-        if (interaction is null)
-        {
-            return;
-        }
-
-        var interactionId = interaction["id"]?.GetValue<string>();
+        var interactionId = OptionalString(interaction, "id", "interaction.created", "$.interaction.id");
         if (!string.IsNullOrWhiteSpace(interactionId))
         {
             _responseId = interactionId;
@@ -77,7 +72,7 @@ internal sealed class GeminiSseEventReducer
             _messageId ??= interactionId;
         }
 
-        var modelId = interaction["model"]?.GetValue<string>();
+        var modelId = OptionalString(interaction, "model", "interaction.created", "$.interaction.model");
         if (!string.IsNullOrWhiteSpace(modelId))
         {
             _modelId = modelId;
@@ -87,40 +82,47 @@ internal sealed class GeminiSseEventReducer
 
     private void HandleStatusUpdate(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
-        var status = payload?["status"]?.GetValue<string>();
+        payload = RequirePayload(payload, "interaction.status_update");
+        var status = RequireString(payload, "status", "interaction.status_update", "$.status");
         if (!string.Equals(status, "error", StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
 
         var error = payload?["error"] as JsonObject ?? payload;
-        var message = error?["message"]?.GetValue<string>() ?? "Gemini streaming error.";
+        var message = OptionalString(error, "message", "interaction.status_update", "$.error.message") ?? "Gemini streaming error.";
+        var code = OptionalString(error, "code", "interaction.status_update", "$.error.code")
+            ?? OptionalString(error, "status", "interaction.status_update", "$.error.status");
         _logger?.LogWarning("Gemini streaming error status received: {Message}", message);
-        updates.Add(CreateContentsUpdate([new ErrorContent(message)]));
+        updates.Add(CreateContentsUpdate([
+            new ErrorContent(message)
+            {
+                ErrorCode = code,
+                Details = error?.ToJsonString(),
+            },
+        ]));
     }
 
     private void HandleStepStart(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
-        if (!TryGetIndex(payload, out var index))
-        {
-            return;
-        }
+        payload = RequirePayload(payload, "step.start");
+        var index = RequireIndex(payload, "step.start");
 
-        var step = payload?["step"] as JsonObject;
-        var type = step?["type"]?.GetValue<string>();
-        if (string.IsNullOrWhiteSpace(type))
+        var step = RequireObject(payload, "step", "step.start", "$.step");
+        var type = RequireString(step, "type", "step.start", "$.step.type");
+        if (!IsSupportedStepType(type))
         {
-            _logger?.LogDebug("Ignoring Gemini SSE step.start without a step type.");
+            _logger?.LogDebug("Ignoring unsupported Gemini SSE step.start type {StepType}.", type);
             return;
         }
 
         var content = new InFlightContent(type)
         {
-            Id = step?["id"]?.GetValue<string>(),
-            Name = step?["name"]?.GetValue<string>(),
-            CallId = step?["call_id"]?.GetValue<string>(),
-            Arguments = step?["arguments"]?.DeepClone(),
-            Payload = step is null ? null : (JsonObject)step.DeepClone(),
+            Id = OptionalString(step, "id", "step.start", "$.step.id"),
+            Name = OptionalString(step, "name", "step.start", "$.step.name"),
+            CallId = OptionalString(step, "call_id", "step.start", "$.step.call_id"),
+            Arguments = step["arguments"]?.DeepClone(),
+            Payload = (JsonObject)step.DeepClone(),
         };
         _contentByIndex[index] = content;
 
@@ -135,7 +137,7 @@ internal sealed class GeminiSseEventReducer
 
         if (type != "function_call" || !IsEmptyObject(content.Arguments))
         {
-            EmitFunctionCallIfReady(content, updates);
+            EmitFunctionCallIfReady(content, updates, requireComplete: false);
         }
 
         EmitBuiltInToolCallIfReady(content, updates);
@@ -144,32 +146,19 @@ internal sealed class GeminiSseEventReducer
 
     private void HandleStepDelta(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
-        if (!TryGetIndex(payload, out var index))
-        {
-            return;
-        }
+        payload = RequirePayload(payload, "step.delta");
+        var index = RequireIndex(payload, "step.delta");
 
-        var delta = payload?["delta"] as JsonObject;
-        if (delta is null)
-        {
-            _logger?.LogDebug("Ignoring Gemini SSE step.delta without a delta payload.");
-            return;
-        }
+        var delta = RequireObject(payload, "delta", "step.delta", "$.delta");
 
-        var deltaType = delta["type"]?.GetValue<string>();
-        if (string.IsNullOrWhiteSpace(deltaType))
-        {
-            _logger?.LogDebug("Ignoring Gemini SSE step.delta without a delta type.");
-            return;
-        }
-
-        var content = GetOrCreateContent(index, deltaType);
-        MergePayload(content, delta);
+        var deltaType = RequireString(delta, "type", "step.delta", "$.delta.type");
 
         switch (deltaType)
         {
             case "text":
-                var text = delta["text"]?.GetValue<string>();
+                var content = GetOrCreateContent(index, deltaType);
+                MergePayload(content, delta);
+                var text = RequireString(delta, "text", "step.delta", "$.delta.text");
                 if (!string.IsNullOrEmpty(text))
                 {
                     updates.Add(CreateTextUpdate(text));
@@ -178,26 +167,39 @@ internal sealed class GeminiSseEventReducer
                 break;
 
             case "arguments":
+                content = GetOrCreateContent(index, deltaType);
+                MergePayload(content, delta);
                 content.Type = "function_call";
-                AppendArgumentsDelta(content, delta);
+                AppendArgumentsDelta(content, delta, "step.delta");
 
                 break;
 
             case "arguments_delta":
+                content = GetOrCreateContent(index, deltaType);
+                MergePayload(content, delta);
                 content.Type = "function_call";
-                AppendArgumentsDelta(content, delta);
+                AppendArgumentsDelta(content, delta, "step.delta");
 
                 break;
 
             case "thought_signature":
+                content = GetOrCreateContent(index, deltaType);
+                MergePayload(content, delta);
                 content.Type = "thought";
-                content.Signature = delta["signature"]?.GetValue<string>();
+                content.Signature = RequireString(delta, "signature", "step.delta", "$.delta.signature");
                 break;
 
             case "thought_summary":
+                content = GetOrCreateContent(index, deltaType);
+                MergePayload(content, delta);
                 content.Type = "thought";
-                var summary = delta["content"]?["text"]?.GetValue<string>()
-                    ?? delta["text"]?.GetValue<string>();
+                var summary = OptionalString(delta["content"] as JsonObject, "text", "step.delta", "$.delta.content.text")
+                    ?? OptionalString(delta, "text", "step.delta", "$.delta.text");
+                if (summary is null)
+                {
+                    throw Protocol("Gemini SSE thought_summary delta must contain summary text.", "step.delta", "$.delta.text");
+                }
+
                 if (!string.IsNullOrEmpty(summary))
                 {
                     updates.Add(CreateContentsUpdate([new TextReasoningContent(summary)]));
@@ -206,30 +208,36 @@ internal sealed class GeminiSseEventReducer
                 break;
 
             case "function_call":
+                content = GetOrCreateContent(index, deltaType);
+                MergePayload(content, delta);
                 content.Type = "function_call";
-                content.Id = delta["id"]?.GetValue<string>() ?? content.Id;
-                content.Name = delta["name"]?.GetValue<string>() ?? content.Name;
+                content.Id = OptionalString(delta, "id", "step.delta", "$.delta.id") ?? content.Id;
+                content.Name = OptionalString(delta, "name", "step.delta", "$.delta.name") ?? content.Name;
                 if (delta["arguments"] is not null)
                 {
                     content.Arguments = delta["arguments"]?.DeepClone();
                 }
 
-                EmitFunctionCallIfReady(content, updates);
+                EmitFunctionCallIfReady(content, updates, requireComplete: false);
                 break;
 
             default:
                 if (GeminiBuiltInToolBridge.IsBuiltInToolCallType(deltaType))
                 {
+                    content = GetOrCreateContent(index, deltaType);
+                    MergePayload(content, delta);
                     content.Type = deltaType;
-                    content.Id = delta["id"]?.GetValue<string>() ?? content.Id;
+                    content.Id = OptionalString(delta, "id", "step.delta", "$.delta.id") ?? content.Id;
                     EmitBuiltInToolCallIfReady(content, updates);
                     break;
                 }
 
                 if (GeminiBuiltInToolBridge.IsBuiltInToolResultType(deltaType))
                 {
+                    content = GetOrCreateContent(index, deltaType);
+                    MergePayload(content, delta);
                     content.Type = deltaType;
-                    content.CallId = delta["call_id"]?.GetValue<string>() ?? content.CallId;
+                    content.CallId = OptionalString(delta, "call_id", "step.delta", "$.delta.call_id") ?? content.CallId;
                     EmitBuiltInToolResultIfReady(content, updates);
                     break;
                 }
@@ -241,14 +249,12 @@ internal sealed class GeminiSseEventReducer
 
     private void HandleStepStop(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
-        if (!TryGetIndex(payload, out var index))
-        {
-            return;
-        }
+        payload = RequirePayload(payload, "step.stop");
+        var index = RequireIndex(payload, "step.stop");
 
         if (_contentByIndex.TryGetValue(index, out var content))
         {
-            EmitFunctionCallIfReady(content, updates);
+            EmitFunctionCallIfReady(content, updates, requireComplete: true);
             EmitBuiltInToolCallIfReady(content, updates);
             EmitBuiltInToolResultIfReady(content, updates);
         }
@@ -256,22 +262,25 @@ internal sealed class GeminiSseEventReducer
 
     private void HandleInteractionCompleted(JsonObject? payload, List<ChatResponseUpdate> updates)
     {
-        CaptureInteractionMetadata(payload?["interaction"] as JsonObject);
+        payload = RequirePayload(payload, "interaction.completed");
+        var interaction = RequireObject(payload, "interaction", "interaction.completed", "$.interaction");
+        CaptureInteractionMetadata(interaction);
 
         foreach (var content in _contentByIndex.Values)
         {
-            EmitFunctionCallIfReady(content, updates);
+            EmitFunctionCallIfReady(content, updates, requireComplete: true);
             EmitBuiltInToolCallIfReady(content, updates);
             EmitBuiltInToolResultIfReady(content, updates);
         }
 
-        var usage = MapUsageDetails((payload?["interaction"] as JsonObject)?["usage"]);
-        if (usage is null)
-        {
-            return;
-        }
+        var usage = GeminiUsageMapper.Map(interaction["usage"]);
+        var finishReason = GeminiInteractionsChatClient.MapFinishReason(OptionalString(interaction, "status", "interaction.completed", "$.interaction.status"));
 
-        var update = CreateContentsUpdate([new UsageContent(usage)]);
+        var contents = usage is null
+            ? []
+            : new List<AIContent> { new UsageContent(usage) };
+        var update = CreateContentsUpdate(contents);
+        update.FinishReason = finishReason;
         updates.Add(update);
     }
 
@@ -287,17 +296,32 @@ internal sealed class GeminiSseEventReducer
         return content;
     }
 
-    private void EmitFunctionCallIfReady(InFlightContent content, List<ChatResponseUpdate> updates)
+    private void EmitFunctionCallIfReady(InFlightContent content, List<ChatResponseUpdate> updates, bool requireComplete)
     {
         if (content.FunctionCallEmitted || content.Type != "function_call")
         {
             return;
         }
 
-        var arguments = GetFunctionArguments(content);
+        var arguments = GetFunctionArguments(content, requireComplete);
         if (string.IsNullOrWhiteSpace(content.Id) || string.IsNullOrWhiteSpace(content.Name) || arguments is null)
         {
+            if (requireComplete)
+            {
+                var missing = string.IsNullOrWhiteSpace(content.Id)
+                    ? "id"
+                    : string.IsNullOrWhiteSpace(content.Name)
+                        ? "name"
+                        : "arguments";
+                throw Protocol($"Gemini streamed function_call ended without required '{missing}'.", "step.stop", $"$.delta.{missing}");
+            }
+
             return;
+        }
+
+        if (arguments is not JsonObject)
+        {
+            throw Protocol("Gemini streamed function_call arguments must be a JSON object.", "step.stop", "$.delta.arguments");
         }
 
         var argumentsJson = arguments.ToJsonString();
@@ -311,7 +335,7 @@ internal sealed class GeminiSseEventReducer
         content.FunctionCallEmitted = true;
     }
 
-    private JsonNode? GetFunctionArguments(InFlightContent content)
+    private JsonNode? GetFunctionArguments(InFlightContent content, bool requireComplete)
     {
         if (content.ArgumentsJsonBuilder is not { Length: > 0 } && content.Arguments is not null)
         {
@@ -330,19 +354,24 @@ internal sealed class GeminiSseEventReducer
         }
         catch (JsonException ex)
         {
+            if (requireComplete)
+            {
+                throw Protocol("Gemini streamed function-call arguments were not valid JSON.", "step.stop", "$.delta.arguments", ex);
+            }
+
             _logger?.LogDebug(ex, "Ignoring incomplete Gemini streamed function-call arguments.");
             return null;
         }
     }
 
-    private static void AppendArgumentsDelta(InFlightContent content, JsonObject delta)
+    private static void AppendArgumentsDelta(InFlightContent content, JsonObject delta, string eventType)
     {
         var argumentsDelta = TryGetString(delta, "partial_arguments")
             ?? TryGetString(delta, "arguments_delta")
             ?? TryGetString(delta, "arguments");
         if (string.IsNullOrEmpty(argumentsDelta))
         {
-            return;
+            throw Protocol("Gemini SSE arguments delta must contain argument text.", eventType, "$.delta.partial_arguments");
         }
 
         content.Arguments = null;
@@ -449,23 +478,21 @@ internal sealed class GeminiSseEventReducer
         return update;
     }
 
-    private static bool TryGetIndex(JsonObject? payload, out int index)
+    private static int RequireIndex(JsonObject payload, string eventType)
     {
-        index = default;
-        var node = payload?["index"];
+        var node = payload["index"];
         if (node is null)
         {
-            return false;
+            throw Protocol("Gemini SSE event is missing required index.", eventType, "$.index");
         }
 
         try
         {
-            index = node.GetValue<int>();
-            return true;
+            return node.GetValue<int>();
         }
-        catch
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException)
         {
-            return false;
+            throw Protocol("Gemini SSE event index must be an integer.", eventType, "$.index", ex);
         }
     }
 
@@ -484,6 +511,62 @@ internal sealed class GeminiSseEventReducer
         }
     }
 
+    private static JsonObject RequirePayload(JsonObject? payload, string eventType)
+        => payload ?? throw Protocol("Gemini SSE event must contain a JSON payload.", eventType, "$");
+
+    private static JsonObject RequireObject(JsonObject payload, string propertyName, string eventType, string jsonPath)
+    {
+        if (payload[propertyName] is JsonObject value)
+        {
+            return value;
+        }
+
+        throw Protocol($"Gemini SSE event field '{propertyName}' must be a JSON object.", eventType, jsonPath);
+    }
+
+    private static string RequireString(JsonObject payload, string propertyName, string eventType, string jsonPath)
+    {
+        var value = OptionalString(payload, propertyName, eventType, jsonPath);
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        throw Protocol($"Gemini SSE event field '{propertyName}' must be a non-empty string.", eventType, jsonPath);
+    }
+
+    private static string? OptionalString(JsonObject? payload, string propertyName, string eventType, string jsonPath)
+    {
+        if (payload is null || !payload.TryGetPropertyValue(propertyName, out var node) || node is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return node.GetValue<string>();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException)
+        {
+            throw Protocol($"Gemini SSE event field '{propertyName}' must be a string.", eventType, jsonPath, ex);
+        }
+    }
+
+    private static bool IsSupportedStepType(string type)
+        => type is "model_output" or "thought" or "function_call"
+            || GeminiBuiltInToolBridge.IsBuiltInToolCallType(type)
+            || GeminiBuiltInToolBridge.IsBuiltInToolResultType(type);
+
+    private static GeminiProtocolException Protocol(string message, string eventType, string jsonPath, Exception? innerException = null)
+        => new(
+            message,
+            operationName: nameof(GeminiInteractionsChatClient.GetStreamingResponseAsync),
+            sseEventType: eventType,
+            jsonPath: jsonPath,
+            responseId: null,
+            modelId: null,
+            innerException: innerException);
+
     private static void MergePayload(InFlightContent content, JsonObject delta)
     {
         content.Payload ??= [];
@@ -494,8 +577,6 @@ internal sealed class GeminiSseEventReducer
         }
     }
 
-    private static UsageDetails? MapUsageDetails(JsonNode? usageNode)
-        => GeminiUsageMapper.Map(usageNode);
 
     private sealed class InFlightContent
     {
