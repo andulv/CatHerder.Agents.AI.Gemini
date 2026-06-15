@@ -9,7 +9,7 @@ This repository is a preview .NET package for the Google Gemini Interactions API
 
 Read first:
 - [catherder.instructions.md](catherder.instructions.md)
-- [../../project-status-roadmap.md](../../project-status-roadmap.md)
+- [../project-status-roadmap.md](../project-status-roadmap.md)
 
 ## Scope
 - Keep package code independent of the main CatHerder application; no `CatHerder.*` project dependencies beyond this package namespace.
