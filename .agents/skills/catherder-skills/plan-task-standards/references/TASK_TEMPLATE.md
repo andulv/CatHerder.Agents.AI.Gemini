@@ -1,10 +1,9 @@
 ---
 type: reference
 description: "Template for task files inside plan-local tasks/ folders"
-snapshot_date: 2026-03-05
+snapshot_date: 2026-05-31
 sources:
-  - docs/catherder/plans-and-tasks.md
-  - docs/catherder/file-formats.md
+  - references/plan-task-spec-2026-05.md
 ---
 # Task Template (Plan-Local)
 
@@ -14,18 +13,13 @@ Use this for files like `tasks/task002-01-short-name.md`.
 ---
 type: task
 description: "Task NNN-NN — one-line objective"
+status: not-started
+created: YYYY-MM-DDTHH:MM:SS+HH:MM
+updated: YYYY-MM-DDTHH:MM:SS+HH:MM
 ---
-# Task NNN-NN: <Title>
-
-**Status:** `not-started`
-
-**Created:** YYYY-MM-DDTHH:MM:SS+HH:MM
-
-**Updated:** YYYY-MM-DDTHH:MM:SS+HH:MM
-
-## Task ID
-
-NNN-NN
+## Required Context
+Load and follow these skills:
+- `<skill-name>`
 
 ## Objective
 
@@ -42,11 +36,29 @@ Included and excluded work.
 
 ## Verification
 
-How this task is verified in isolation.
+- `<command or search check>` exits 0 / expected result.
+- Manual check: <specific yes/no condition>.
 
-## Notes
+---
 
-No plan changes allowed here.
+Everything above this line is the task specification. Everything below is the
+execution record. These sections repeat per review round (e.g. `Executor Notes
+(post-review)`, `Reviewer Verification (second pass)`).
+
+# Execution
+
+## Executor Notes
+By: <agent/model-or-unknown> @ <YYYY-MM-DDTHH:MM:SS+HH:MM>
+
+## Executor Verification
+By: <agent/model-or-unknown> @ <YYYY-MM-DDTHH:MM:SS+HH:MM>
+
+## Reviewer Verification
+By: <agent/model-or-unknown> @ <YYYY-MM-DDTHH:MM:SS+HH:MM>
+
+## Review Notes
+By: <agent/model-or-unknown> @ <YYYY-MM-DDTHH:MM:SS+HH:MM>
+
 ```
 
 ## Naming

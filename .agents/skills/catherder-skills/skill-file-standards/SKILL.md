@@ -1,6 +1,8 @@
 ---
 name: skill-file-standards
 description: "Defines standards and best practices for authoring Agent Skill folders and SKILL.md files (frontmatter, descriptions/triggers, progressive disclosure, references/scripts/assets, and validation with skills-ref). Use when creating a new skill, reviewing or validating an existing skill, fixing skill discovery issues, or deciding what belongs in SKILL.md vs references/ vs scripts/. Use when user or you want to run skills-ref validation on a skill folder."
+metadata:
+  version: "1.1"
 ---
 # Skill File Standards
 
@@ -11,12 +13,15 @@ This skill is intentionally concise. Detailed (dated) notes live in `references/
 ## Quick Rules (what to remember)
 
 - Frontmatter `description` is routing metadata: include **WHAT** + **WHEN** + user keywords.
-- Write `description` in **third person**.- **Skills must be self-contained.** Never reference external files (e.g., `repo/` docs, workflow files, other project paths) as runtime dependencies. Instead, condense all needed knowledge into the skill's own `SKILL.md` and `references/`. External sources are *inputs to skill authoring* — the skill ships its own copy. When sources change, regenerate the skill's references.- Keep `SKILL.md` an index + procedure; push long/volatile material into `references/`.
+- Write `description` in **third person**.
+- **Skills must be self-contained.** Never reference external files (e.g., `repo/` docs, workflow files, other project paths) as runtime dependencies. Instead, condense all needed knowledge into the skill's own `SKILL.md` and `references/`. External sources are *inputs to skill authoring* — the skill ships its own copy. When sources change, regenerate the skill's references.
+- Keep `SKILL.md` an index + procedure; push long/volatile material into `references/`.
 - Reference files in `references/` MUST use YAML frontmatter (CatHerder convention) with provenance (`snapshot_date`, `sources`) so future humans/agents can re-check upstream.
 - Keep references **one hop from `SKILL.md`** (avoid deep chains).
 - Use forward slashes in paths (avoid Windows `\\` paths).
 - Prefer **defaults + escape hatches**, not menus of options.
 - Use scripts for deterministic checks; build a “validate → fix → re-validate” loop.
+- Version goes in `metadata` (string→string map), never as a top-level field. Bump minor version by 0.1 on each update.
 
 ## Minimal Standard Skill Layout
 
@@ -38,6 +43,17 @@ Upstream spec requires YAML frontmatter only for `SKILL.md`. CatHerder adds a co
 - Template: `references/REFERENCE_TEMPLATE.md`.
 
 This convention is agent-safe: Markdown frontmatter is either understood or treated as plain text.
+
+## CatHerder Extension: Version in `metadata`
+
+The upstream Agent Skills spec does not define a top-level `version` field.
+CatHerder adds a convention:
+
+- Set version via `metadata.version` (the `metadata` field is a string→string map per the upstream spec).
+- Never use a top-level `version` field.
+- Use semver-style version strings (e.g. `"1.0"`, `"1.1"`).
+- Bump the minor version by 0.1 on each update to the skill (SKILL.md, references, or scripts).
+- Other proprietary/CatHerder-specific metadata also belongs in `metadata` under namespaced keys.
 
 ## Scripts (provided)
 
@@ -77,6 +93,7 @@ Key rules:
 - Every referenced file is linked directly from `SKILL.md`.
 - Every script in `scripts/` starts with the `# SCRIPT_ID:` header block.
 - Validation command exists and is run (prefer `skills-ref validate`).
+- `metadata` includes `version` (semver string, e.g. `"1.0"`); bumped by 0.1 on each update.
 
 ## Validation
 

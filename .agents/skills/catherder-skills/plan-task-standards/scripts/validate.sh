@@ -14,7 +14,16 @@ if [[ $# -ne 1 ]]; then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-venv_python="$(cd "$script_dir/../../../.." && pwd)/.venv/bin/python"
+
+venv_python=""
+d="$script_dir"
+while [[ "$d" != "/" ]]; do
+  if [[ -x "$d/.venv/bin/python" ]]; then
+    venv_python="$d/.venv/bin/python"
+    break
+  fi
+  d="$(dirname "$d")"
+done
 
 if [[ -x "$venv_python" ]]; then
   "$venv_python" "$script_dir/validate.py" "$1"
