@@ -8,7 +8,7 @@ alwaysApply: true
 This repository is a preview .NET package for the Google Gemini Interactions API. It exposes a Microsoft.Extensions.AI `IChatClient` and Microsoft Agent Framework `ChatClientAgent` convenience APIs.
 
 Read first:
-- [catherder.instructions.md](catherder.instructions.md)
+- [catherder.project.instructions.md](catherder.project.instructions.md)
 - [../project-status-roadmap.md](../project-status-roadmap.md)
 
 ## Scope
