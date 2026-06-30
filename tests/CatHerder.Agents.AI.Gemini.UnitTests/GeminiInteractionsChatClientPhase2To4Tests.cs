@@ -152,7 +152,8 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
               "system_instruction": "Be terse.",
               "generation_config": {
                 "temperature": 0.2,
-                "max_output_tokens": 123
+                "max_output_tokens": 123,
+                "thinking_summaries": "auto"
               },
               "tools": [
                 {
@@ -1109,8 +1110,261 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
 
         cts.Cancel();
 
-        var hasNext = await enumerator.MoveNextAsync();
-        Assert.False(hasNext);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await enumerator.MoveNextAsync());
+    }
+
+    [Fact]
+    public async Task GetStreamingResponseAsync_StandaloneErrorEvent_EmitsErrorContent()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("interaction.created", """
+                    {
+                      "interaction": {
+                        "id": "interaction-err",
+                        "status": "in_progress",
+                        "model": "gemini-3.5-flash"
+                      },
+                      "event_type": "interaction.created"
+                    }
+                    """),
+                BuildEvent("error", """
+                    {
+                      "error": {
+                        "message": "High demand, try again later.",
+                        "code": "api_error"
+                      },
+                      "event_type": "error"
+                    }
+                    """),
+                BuildEvent("done", "[DONE]"))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.5-flash");
+
+        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")]));
+
+        var error = Assert.Single(AllContents(updates).OfType<ErrorContent>());
+        Assert.Equal("High demand, try again later.", error.Message);
+        Assert.Equal("api_error", error.ErrorCode);
+    }
+
+    [Fact]
+    public async Task GetStreamingResponseAsync_IncompleteStatus_EmitsTruncationWarning()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("interaction.created", """
+                    {
+                      "interaction": {
+                        "id": "interaction-trunc",
+                        "status": "in_progress",
+                        "model": "gemini-3.5-flash"
+                      },
+                      "event_type": "interaction.created"
+                    }
+                    """),
+                BuildEvent("step.start", """
+                    {
+                      "index": 0,
+                      "step": { "type": "model_output" },
+                      "event_type": "step.start"
+                    }
+                    """),
+                BuildEvent("step.delta", """
+                    {
+                      "index": 0,
+                      "delta": { "text": "Her er", "type": "text" },
+                      "event_type": "step.delta"
+                    }
+                    """),
+                BuildEvent("step.stop", """
+                    {
+                      "index": 0,
+                      "event_type": "step.stop"
+                    }
+                    """),
+                BuildEvent("interaction.completed", """
+                    {
+                      "interaction": {
+                        "id": "interaction-trunc",
+                        "status": "incomplete",
+                        "usage": {
+                          "total_tokens": 100,
+                          "total_input_tokens": 98,
+                          "total_output_tokens": 2
+                        },
+                        "model": "gemini-3.5-flash"
+                      },
+                      "event_type": "interaction.completed"
+                    }
+                    """),
+                BuildEvent("done", "[DONE]"))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.5-flash");
+
+        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")]));
+
+        var textContents = AllContents(updates).OfType<TextContent>().Select(c => c.Text).ToList();
+        Assert.Contains(textContents, t => t!.Contains("truncated", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(updates, u => u.FinishReason == ChatFinishReason.Length);
+    }
+
+    [Fact]
+    public async Task GetStreamingResponseAsync_CompletedStatus_DoesNotEmitTruncationWarning()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("interaction.created", """
+                    {
+                      "interaction": {
+                        "id": "interaction-ok",
+                        "status": "in_progress",
+                        "model": "gemini-3.5-flash"
+                      },
+                      "event_type": "interaction.created"
+                    }
+                    """),
+                BuildEvent("step.start", """
+                    {
+                      "index": 0,
+                      "step": { "type": "model_output" },
+                      "event_type": "step.start"
+                    }
+                    """),
+                BuildEvent("step.delta", """
+                    {
+                      "index": 0,
+                      "delta": { "text": "Full response", "type": "text" },
+                      "event_type": "step.delta"
+                    }
+                    """),
+                BuildEvent("step.stop", """
+                    {
+                      "index": 0,
+                      "event_type": "step.stop"
+                    }
+                    """),
+                BuildEvent("interaction.completed", """
+                    {
+                      "interaction": {
+                        "id": "interaction-ok",
+                        "status": "completed",
+                        "usage": {
+                          "total_tokens": 10,
+                          "total_input_tokens": 8,
+                          "total_output_tokens": 2
+                        },
+                        "model": "gemini-3.5-flash"
+                      },
+                      "event_type": "interaction.completed"
+                    }
+                    """),
+                BuildEvent("done", "[DONE]"))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.5-flash");
+
+        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hi")]));
+
+        var textContents = AllContents(updates).OfType<TextContent>().Select(c => c.Text).ToList();
+        Assert.DoesNotContain(textContents, t => t!.Contains("truncated", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_ThinkingConfig_EffortFromReasoningOptions()
+    {
+        var handler = new JsonRecordingHandler("""
+                {
+                  "id": "interaction-thinking",
+                  "steps": [
+                    {
+                      "type": "model_output",
+                      "content": [{"type": "text", "text": "ok"}]
+                    }
+                  ],
+                  "status": "completed",
+                  "model": "gemini-3.5-flash",
+                  "usage": { "total_tokens": 1 }
+                }
+                """);
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.5-flash");
+
+        var options = new ChatOptions { Reasoning = new ReasoningOptions { Effort = ReasoningEffort.High } };
+        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hi")], options, CancellationToken.None);
+
+        var payload = ParseCapturedPayload(handler);
+        var genConfig = payload["generation_config"]!.AsObject();
+        Assert.Equal("auto", genConfig["thinking_summaries"]!.GetValue<string>());
+        Assert.Equal("high", genConfig["thinking_level"]!.GetValue<string>());
+        Assert.Null(genConfig["thinking_config"]);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_ThinkingConfig_RawEffortFromAdditionalProperties()
+    {
+        var handler = new JsonRecordingHandler("""
+                {
+                  "id": "interaction-thinking2",
+                  "status": "completed",
+                  "model": "gemini-3.5-flash",
+                  "steps": [
+                    {
+                      "type": "model_output",
+                      "content": [{"type": "text", "text": "ok"}]
+                    }
+                  ],
+                  "usage": { "total_tokens": 1 }
+                }
+                """);
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.5-flash");
+
+        var options = new ChatOptions
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary { ["reasoning.effort"] = "minimal" },
+        };
+        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hi")], options, CancellationToken.None);
+
+        var payload = ParseCapturedPayload(handler);
+        var genConfig = payload["generation_config"]!.AsObject();
+        Assert.Equal("auto", genConfig["thinking_summaries"]!.GetValue<string>());
+        Assert.Equal("minimal", genConfig["thinking_level"]!.GetValue<string>());
+        Assert.Null(genConfig["thinking_config"]);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_NoReasoning_StillSendsThinkingSummaries()
+    {
+        var handler = new JsonRecordingHandler("""
+                {
+                  "id": "interaction-thinking2",
+                  "status": "completed",
+                  "model": "gemini-3.5-flash",
+                  "steps": [
+                    {
+                      "type": "model_output",
+                      "content": [{"type": "text", "text": "ok"}]
+                    }
+                  ],
+                  "usage": { "total_tokens": 1 }
+                }
+                """);
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.5-flash");
+
+        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hi")], null, CancellationToken.None);
+
+        var payload = ParseCapturedPayload(handler);
+        var genConfig = payload["generation_config"]!.AsObject();
+        Assert.Equal("auto", genConfig["thinking_summaries"]!.GetValue<string>());
+        Assert.Null(genConfig["thinking_level"]);
+        Assert.Null(genConfig["thinking_config"]);
     }
 
     private static HttpClient CreateHttpClient(HttpMessageHandler handler)

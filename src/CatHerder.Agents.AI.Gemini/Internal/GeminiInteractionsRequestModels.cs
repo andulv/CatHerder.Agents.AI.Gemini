@@ -72,6 +72,10 @@ internal sealed record GeminiInteractionGenerationConfig
     public int? TopK { get; init; }
 
     public IReadOnlyList<string>? StopSequences { get; init; }
+
+    public string? ThinkingSummaries { get; init; }
+
+    public string? ThinkingLevel { get; init; }
 }
 
 internal sealed record GeminiInteractionResponseFormat

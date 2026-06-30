@@ -51,6 +51,10 @@ internal sealed class GeminiSseEventReducer
                 HandleInteractionCompleted(payload, updates);
                 break;
 
+            case "error":
+                HandleErrorEvent(payload, updates);
+                break;
+
             case "done":
                 break;
 
@@ -94,6 +98,23 @@ internal sealed class GeminiSseEventReducer
         var code = OptionalString(error, "code", "interaction.status_update", "$.error.code")
             ?? OptionalString(error, "status", "interaction.status_update", "$.error.status");
         _logger?.LogWarning("Gemini streaming error status received: {Message}", message);
+        updates.Add(CreateContentsUpdate([
+            new ErrorContent(message)
+            {
+                ErrorCode = code,
+                Details = error?.ToJsonString(),
+            },
+        ]));
+    }
+
+    private void HandleErrorEvent(JsonObject? payload, List<ChatResponseUpdate> updates)
+    {
+        payload = RequirePayload(payload, "error");
+        var error = payload["error"] as JsonObject ?? payload;
+        var message = OptionalString(error, "message", "error", "$.error.message") ?? "Gemini streaming error.";
+        var code = OptionalString(error, "code", "error", "$.error.code")
+            ?? OptionalString(error, "status", "error", "$.error.status");
+        _logger?.LogWarning("Gemini streaming error event received: {Message}", message);
         updates.Add(CreateContentsUpdate([
             new ErrorContent(message)
             {
@@ -186,7 +207,11 @@ internal sealed class GeminiSseEventReducer
                 content = GetOrCreateContent(index, deltaType);
                 MergePayload(content, delta);
                 content.Type = "thought";
-                content.Signature = RequireString(delta, "signature", "step.delta", "$.delta.signature");
+                var signature = OptionalString(delta, "signature", "step.delta", "$.delta.signature");
+                if (!string.IsNullOrWhiteSpace(signature))
+                {
+                    content.Signature = signature;
+                }
                 break;
 
             case "thought_summary":
@@ -274,7 +299,15 @@ internal sealed class GeminiSseEventReducer
         }
 
         var usage = GeminiUsageMapper.Map(interaction["usage"]);
-        var finishReason = GeminiInteractionsChatClient.MapFinishReason(OptionalString(interaction, "status", "interaction.completed", "$.interaction.status"));
+        var status = OptionalString(interaction, "status", "interaction.completed", "$.interaction.status");
+        var finishReason = GeminiInteractionsChatClient.MapFinishReason(status);
+
+        if (string.Equals(status, "incomplete", StringComparison.OrdinalIgnoreCase))
+        {
+            updates.Add(CreateContentsUpdate([
+                new TextContent("[Response truncated — max output tokens reached]"),
+            ]));
+        }
 
         var contents = usage is null
             ? []

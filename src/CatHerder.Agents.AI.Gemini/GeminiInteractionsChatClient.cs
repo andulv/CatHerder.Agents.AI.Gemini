@@ -166,7 +166,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            yield break;
+            throw;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
@@ -206,7 +206,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    yield break;
+                    throw;
                 }
 
                 if (line is null)
@@ -652,6 +652,8 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             stopSequences = options.StopSequences.ToList();
         }
 
+        var thinkingLevel = MapThinkingLevel(options);
+
         var generationConfig = new GeminiInteractionGenerationConfig
         {
             Temperature = options?.Temperature,
@@ -659,6 +661,8 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             TopP = options?.TopP,
             TopK = options?.TopK,
             StopSequences = stopSequences,
+            ThinkingSummaries = "auto",
+            ThinkingLevel = thinkingLevel,
         };
 
         return generationConfig.Temperature is null
@@ -666,8 +670,41 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             && generationConfig.TopP is null
             && generationConfig.TopK is null
             && generationConfig.StopSequences is null
+            && generationConfig.ThinkingSummaries is null
+            && generationConfig.ThinkingLevel is null
             ? null
             : generationConfig;
+    }
+
+    private static string? MapThinkingLevel(ChatOptions? options)
+    {
+        if (options is null)
+        {
+            return null;
+        }
+
+        string? level = null;
+
+        if (options.Reasoning is { } reasoning)
+        {
+            level = reasoning.Effort switch
+            {
+                ReasoningEffort.Low => "low",
+                ReasoningEffort.Medium => "medium",
+                ReasoningEffort.High => "high",
+                ReasoningEffort.ExtraHigh => "high",
+                _ => null,
+            };
+        }
+
+        if (options.AdditionalProperties?.TryGetValue("reasoning.effort", out var rawEffort) == true
+            && rawEffort is string rawEffortString
+            && !string.IsNullOrWhiteSpace(rawEffortString))
+        {
+            level = rawEffortString.Trim().ToLowerInvariant();
+        }
+
+        return level;
     }
 
     private static GeminiInteractionResponseFormat? MapResponseFormat(ChatResponseFormat? responseFormat)
