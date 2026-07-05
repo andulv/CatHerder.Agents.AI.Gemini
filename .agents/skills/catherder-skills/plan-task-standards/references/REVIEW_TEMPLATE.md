@@ -1,14 +1,21 @@
 ---
 type: reference
 description: "Templates for review files under a plan's review/ folder"
-snapshot_date: 2026-05-31
+snapshot_date: 2026-07-04
 sources:
   - references/plan-task-spec-2026-05.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/plan016-spec.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/review/plan016-implementation-review-codex.md
 ---
 # Review Templates
 
 Reviews are durable artifacts: write them to the plan's `review/` folder (not
 chat) so findings and decisions stay traceable. Reviews exist for the spec and/or the implementation.
+
+Review findings are **peer input**, not commands. The author evaluates each
+finding, records a disposition (`address` / `won't-address` / `partial`) in the
+review, and applies fixes only when the current dispatch includes response/fix
+work — or when the orchestrator dispatches it.
 
 ## Per-reviewer review
 

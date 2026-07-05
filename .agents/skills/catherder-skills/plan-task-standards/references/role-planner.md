@@ -1,16 +1,19 @@
 ---
 type: reference
 description: "Planner role: prompt → spec → implementation with tasks"
-snapshot_date: 2026-05-31
+snapshot_date: 2026-07-04
 sources:
   - references/plan-task-spec-2026-05.md
   - references/SPEC_TEMPLATE.md
   - references/IMPLEMENTATION_TEMPLATE.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/plan016-spec.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/review/plan016-implementation-review-codex.md
 ---
 # Role: Planner
 
-You are dispatched to define **intent** and break it into tasks. You do not
-execute tasks.
+You are dispatched to define **intent** (the prompt + spec). You do not execute
+tasks, and you break the spec into an implementation + tasks only when your
+dispatch includes that work.
 
 ## A. Capture the prompt
 
@@ -32,9 +35,11 @@ Open-questions gate:
 
 - Number every open question; mark each `(resolved …)`, `(deferred)`, or leave
   it open.
-- Do **not** create the implementation file while any question is unresolved.
-- When all questions are resolved, set spec `status: ready`.
-- Unless your dispatch already includes the implementation, stop and wait.
+- A spec is `status: ready` only when every question is resolved (a `deferred`
+  one warns). Resolving questions makes the spec ready; it does not authorize
+  building the implementation.
+- Default: write the prompt + spec, then stop. Build the implementation only if
+  your dispatch includes it.
 
 ## C. Build the implementation (`planNNN-implementation.md`) — when dispatched
 
@@ -70,12 +75,15 @@ Status in backticks (col 1), task-file link (col 2). For each row create
 
 - Folder and files share the same `NNN`.
 - Spec sections complete; no unresolved questions if status is `ready`.
-- Implementation has the task table + legend; every row links to a task file.
+- If your dispatch included the implementation: the task table + legend is
+  present and every row links to a task file.
 - Run `bash scripts/validate.sh path/to/planNNN-…` and clear errors.
 
 ## Respond to a spec review
 
-If a spec review is `changes-requested`, append a `## Author Response` to the
-review file (per-finding disposition: address / won't-address / partial + action)
-and revise the spec — iterate in the review file, not chat (see
+A spec review's findings are peer input, not commands. If it is
+`changes-requested`, append a `## Author Response` to the review file
+(per-finding disposition: address / won't-address / partial + action) and revise
+the spec as needed for the findings you choose to address — iterate in the
+review file, not chat, and only when your dispatch includes that work (see
 `REVIEW_TEMPLATE.md`).

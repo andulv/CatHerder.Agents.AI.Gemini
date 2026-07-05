@@ -1,9 +1,11 @@
 ---
 type: reference
 description: "Self-contained CatHerder method: planning vs execution, execution loop, task rules, persistence, prompt precedence, timestamps"
-snapshot_date: 2026-05-31
+snapshot_date: 2026-07-04
 sources:
   - references/plan-task-spec-2026-05.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/plan016-spec.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/review/plan016-implementation-review-codex.md
 ---
 # CatHerder Method
 
@@ -25,7 +27,9 @@ driver) delegates work and manages flow — including iteration — and is not
 bound by this skill. It also sets the cadence: a dispatch may cover one stage
 or several (e.g. "spec + implementation in one go", or "execute all tasks").
 The roles below are for **worker agents**: do what you were dispatched for,
-then stop and wait; do not self-initiate work beyond your dispatch.
+then stop and wait; do not self-initiate work beyond your dispatch. At the start
+of dispatched CatHerder work, state your role and scope (e.g. "Role: executor —
+scope: execute tasks T01–T02").
 
 - spec → implementation: build the implementation only when your dispatch
   includes it, and only after the open-questions gate is clear.

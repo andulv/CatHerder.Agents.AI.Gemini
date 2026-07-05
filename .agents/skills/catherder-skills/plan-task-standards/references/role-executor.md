@@ -1,10 +1,12 @@
 ---
 type: reference
 description: "Executor role: execute exactly one task and record the result"
-snapshot_date: 2026-05-31
+snapshot_date: 2026-07-04
 sources:
   - references/plan-task-spec-2026-05.md
   - references/TASK_TEMPLATE.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/plan016-spec.md
+  - ../../../../../.catherder/plans/plan016-planner-stop-after-spec-clarity/review/plan016-implementation-review-codex.md
 ---
 # Role: Executor
 
@@ -48,5 +50,8 @@ Do **not** set `reviewed` or `completed` — those belong to the reviewer.
   table mirrors it. Update the file first, then the table.
 - A new failure you introduce cannot be waived. A pre-existing failure may be
   left only if it was listed in `## Verification` beforehand.
+- If dispatched to address `## Review Notes`, treat them as peer input: record
+  your disposition in the task's execution record (a new round) and apply fixes
+  only within that dispatch.
 - After your dispatched task(s) are `implemented` (or `blocked`), stop and wait.
   Do not review or start undirected tasks.

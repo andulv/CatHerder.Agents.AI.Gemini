@@ -2,7 +2,7 @@
 name: plan-task-standards
 description: "Self-contained CatHerder method and standards for plans and tasks: planning vs execution, execution loop, prompt precedence, persistence; plus prompt/spec/implementation/review/follow-up files, frontmatter, statuses, timestamps, the open-questions gate, and validation. Use when planning, creating, reviewing, executing, or validating planNNN folders, or fixing plan/task format drift."
 metadata:
-  version: "1.5"
+  version: "1.6"
 ---
 # Plan & Task Standards
 
@@ -51,11 +51,14 @@ These are canonical defaults. Projects may vary when they have a reason.
 
 ## Find Your Job
 
+Each row below is a **separate dispatch**. Do the one you were dispatched for,
+then stop — do not start the next stage unless your dispatch includes it.
+
 | You are about to… | Role | Read |
 |---|---|---|
 | Understand the CatHerder method (always) | any | `references/method.md` |
 | Write the prompt and spec (intent) | planner | `references/role-planner.md` |
-| Turn a spec into an implementation with tasks | planner | `references/role-planner.md` |
+| Turn a spec into an implementation with tasks (a separate dispatch) | planner | `references/role-planner.md` |
 | Execute a task | executor | `references/role-executor.md` |
 | Review a spec/implementation, or verify a task | reviewer | `references/role-reviewer.md` |
 | Validate or fix file format/drift | any | run the validator (below) |
@@ -84,8 +87,9 @@ Plans live in the plans folder. Decisions (ADRs) live in the decisions folder.
 ## Quick Rules (all roles)
 
 - Status, timestamps, and `type` live in **frontmatter** (`name` is not used).
-- **Open-questions gate:** do not create the implementation while any spec open
-  question is unresolved.
+- **Open-questions gate:** a spec is `ready` only when every open question is
+  resolved. Resolving questions is required for `ready`, not a green light to
+  build the implementation — that still needs a dispatch.
 - A task is `completed` only after verification passed **and** review accepted.
 
 Status values, timestamp format, required sections, and the task-table shape
