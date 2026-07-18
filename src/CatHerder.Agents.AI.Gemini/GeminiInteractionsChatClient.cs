@@ -445,6 +445,14 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
                     break;
 
+                case DataContent dataContent when dataContent.HasTopLevelMediaType("image"):
+                    content.Add(MapImageContent(dataContent));
+                    break;
+
+                case UriContent uriContent when uriContent.HasTopLevelMediaType("image"):
+                    content.Add(MapImageContent(uriContent));
+                    break;
+
                 case FunctionCallContent functionCall:
                     RememberFunctionName(functionCall.CallId, functionCall.Name);
                     content.Add(new GeminiInteractionContent
@@ -605,44 +613,58 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             return text;
         }
 
+        if (result is AIContent contentItem)
+        {
+            return MapFunctionResultContent([contentItem]);
+        }
+
         if (result is IEnumerable<AIContent> contentItems)
         {
-            var items = new List<GeminiInteractionContent>();
-            foreach (var item in contentItems)
-            {
-                if (item is TextContent textContent)
-                {
-                    items.Add(new GeminiInteractionContent
-                    {
-                        Type = "text",
-                        Text = textContent.Text ?? string.Empty,
-                    });
-                }
-                else if (item is DataContent dataContent && dataContent.HasTopLevelMediaType("image"))
-                {
-                    items.Add(new GeminiInteractionContent
-                    {
-                        Type = "image",
-                        MimeType = dataContent.MediaType,
-                        Data = Convert.ToBase64String(dataContent.Data.ToArray()),
-                    });
-                }
-                else if (item is UriContent uriContent && uriContent.HasTopLevelMediaType("image"))
-                {
-                    items.Add(new GeminiInteractionContent
-                    {
-                        Type = "image",
-                        MimeType = uriContent.MediaType,
-                        Uri = uriContent.Uri.ToString(),
-                    });
-                }
-            }
-
-            return items;
+            return MapFunctionResultContent(contentItems);
         }
 
         return result;
     }
+
+    private static List<GeminiInteractionContent> MapFunctionResultContent(IEnumerable<AIContent> contentItems)
+    {
+        var items = new List<GeminiInteractionContent>();
+        foreach (var item in contentItems)
+        {
+            if (item is TextContent textContent)
+            {
+                items.Add(new GeminiInteractionContent
+                {
+                    Type = "text",
+                    Text = textContent.Text ?? string.Empty,
+                });
+            }
+            else if (item is DataContent dataContent && dataContent.HasTopLevelMediaType("image"))
+            {
+                items.Add(MapImageContent(dataContent));
+            }
+            else if (item is UriContent uriContent && uriContent.HasTopLevelMediaType("image"))
+            {
+                items.Add(MapImageContent(uriContent));
+            }
+        }
+
+        return items;
+    }
+
+    private static GeminiInteractionContent MapImageContent(DataContent image) => new()
+    {
+        Type = "image",
+        MimeType = image.MediaType,
+        Data = Convert.ToBase64String(image.Data.ToArray()),
+    };
+
+    private static GeminiInteractionContent MapImageContent(UriContent image) => new()
+    {
+        Type = "image",
+        MimeType = image.MediaType,
+        Uri = image.Uri.ToString(),
+    };
 
     private static GeminiInteractionGenerationConfig? MapChatOptionsToGenerationConfig(ChatOptions? options)
     {

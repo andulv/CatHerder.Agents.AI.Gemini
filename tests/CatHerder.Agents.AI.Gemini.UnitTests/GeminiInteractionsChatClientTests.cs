@@ -170,6 +170,30 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
+    public async Task GetResponseAsync_SerializesUserImageContent()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        await client.GetResponseAsync(
+        [
+            new ChatMessage(ChatRole.User,
+            [
+                new TextContent("Describe this image."),
+                new DataContent(new byte[] { 0x89, 0x50, 0x4e, 0x47 }, "image/png"),
+            ]),
+        ]);
+
+        var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
+        var image = Assert.IsType<JsonObject>(input[1]);
+
+        Assert.Equal("image", image["type"]!.GetValue<string>());
+        Assert.Equal("image/png", image["mime_type"]!.GetValue<string>());
+        Assert.Equal("iVBORw==", image["data"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task GetResponseAsync_SerializesFunctionResultMessageAsFunctionResultContent()
     {
         var handler = new RecordingHandler();
@@ -195,6 +219,32 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Equal("get_weather", functionResult["name"]!.GetValue<string>());
         Assert.Equal("call-1", functionResult["call_id"]!.GetValue<string>());
         Assert.Equal("tool-result", functionResult["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_SerializesDirectImageToolResultAsMultimodalFunctionResult()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        await client.GetResponseAsync(
+        [
+            new ChatMessage(ChatRole.User, "Inspect the image."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call-1", "read_image", new Dictionary<string, object?> { ["path"] = "cat.png" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call-1", new DataContent(new byte[] { 0x89, 0x50, 0x4e, 0x47 }, "image/png"))]),
+        ]);
+
+        var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
+        var functionResult = Assert.IsType<JsonObject>(input[2]);
+        var result = Assert.IsType<JsonArray>(functionResult["result"]);
+        var image = Assert.IsType<JsonObject>(Assert.Single(result));
+
+        Assert.Equal("function_result", functionResult["type"]!.GetValue<string>());
+        Assert.Equal("read_image", functionResult["name"]!.GetValue<string>());
+        Assert.Equal("image", image["type"]!.GetValue<string>());
+        Assert.Equal("image/png", image["mime_type"]!.GetValue<string>());
+        Assert.Equal("iVBORw==", image["data"]!.GetValue<string>());
     }
 
     [Fact]
