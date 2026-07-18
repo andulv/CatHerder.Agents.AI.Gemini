@@ -272,32 +272,6 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
-    public async Task GetResponseAsync_SerializesDirectPdfToolResultAsMultimodalFunctionResult()
-    {
-        var handler = new RecordingHandler();
-        using var httpClient = CreateHttpClient(handler);
-        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
-
-        await client.GetResponseAsync(
-        [
-            new ChatMessage(ChatRole.User, "Inspect the PDF."),
-            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call-1", "ReadMedia", new Dictionary<string, object?> { ["path"] = "report.pdf" })]),
-            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call-1", new DataContent("%PDF-1.7\n"u8.ToArray(), "application/pdf"))]),
-        ]);
-
-        var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
-        var functionResult = Assert.IsType<JsonObject>(input[2]);
-        var result = Assert.IsType<JsonArray>(functionResult["result"]);
-        var document = Assert.IsType<JsonObject>(Assert.Single(result));
-
-        Assert.Equal("function_result", functionResult["type"]!.GetValue<string>());
-        Assert.Equal("ReadMedia", functionResult["name"]!.GetValue<string>());
-        Assert.Equal("document", document["type"]!.GetValue<string>());
-        Assert.Equal("application/pdf", document["mime_type"]!.GetValue<string>());
-        Assert.Equal("JVBERi0xLjcK", document["data"]!.GetValue<string>());
-    }
-
-    [Fact]
     public async Task GetResponseAsync_Throws_WhenFunctionResultNameCannotBeResolved()
     {
         var handler = new RecordingHandler();

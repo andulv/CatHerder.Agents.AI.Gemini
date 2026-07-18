@@ -655,14 +655,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             {
                 items.Add(MapImageContent(uriContent));
             }
-            else if (item is DataContent pdfContent && pdfContent.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
-            {
-                items.Add(MapDocumentContent(pdfContent));
-            }
-            else if (item is UriContent pdfUriContent && pdfUriContent.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
-            {
-                items.Add(MapDocumentContent(pdfUriContent));
-            }
         }
 
         return items;
