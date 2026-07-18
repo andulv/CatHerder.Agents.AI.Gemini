@@ -511,6 +511,38 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
+    public async Task GetResponseAsync_MapsImageModelOutput_ToDataContent()
+    {
+        const string responseJson = """
+            {
+              "id": "interaction-image-1",
+              "model": "gemini-3.1-flash-image",
+              "steps": [
+                {
+                  "type": "model_output",
+                  "content": [
+                    {
+                      "type": "image",
+                      "mime_type": "image/jpeg",
+                      "data": "/9j/"
+                    }
+                  ]
+                }
+              ]
+            }
+            """;
+
+        using var httpClient = CreateHttpClient(new RecordingHandler(HttpStatusCode.OK, responseJson));
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.1-flash-image");
+
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Generate an image.")]);
+
+        var image = Assert.Single(response.Messages.Single().Contents.OfType<DataContent>());
+        Assert.Equal("image/jpeg", image.MediaType);
+        Assert.Equal(new byte[] { 0xff, 0xd8, 0xff }, image.Data.ToArray());
+    }
+
+    [Fact]
     public async Task GetResponseAsync_ThrowsGeminiApiException_WithParsedProviderError()
     {
         const string errorBody = """

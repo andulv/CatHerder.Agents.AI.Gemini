@@ -267,6 +267,57 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
     }
 
     [Fact]
+    public async Task GetStreamingResponseAsync_ImageDelta_EmitsDataContent()
+    {
+        var handler = new StreamingRequestHandler(
+            CreateSseResponse(CreateSsePayload(
+                BuildEvent("interaction.created", """
+                    {
+                      "interaction": {
+                        "id": "interaction-image-stream-1",
+                        "status": "in_progress",
+                        "model": "gemini-3.1-flash-image"
+                      }
+                    }
+                    """),
+                BuildEvent("step.start", """
+                    {
+                      "index": 0,
+                      "step": { "type": "model_output" }
+                    }
+                    """),
+                BuildEvent("step.delta", """
+                    {
+                      "index": 0,
+                      "delta": {
+                        "type": "image",
+                        "mime_type": "image/jpeg",
+                        "data": "/9j/"
+                      }
+                    }
+                    """),
+                BuildEvent("interaction.completed", """
+                    {
+                      "interaction": {
+                        "id": "interaction-image-stream-1",
+                        "status": "completed",
+                        "model": "gemini-3.1-flash-image"
+                      }
+                    }
+                    """),
+                BuildEvent("done", "[DONE]"))));
+
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3.1-flash-image");
+
+        var updates = await CollectUpdatesAsync(client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Generate an image.")]));
+
+        var image = Assert.Single(AllContents(updates).OfType<DataContent>());
+        Assert.Equal("image/jpeg", image.MediaType);
+        Assert.Equal(new byte[] { 0xff, 0xd8, 0xff }, image.Data.ToArray());
+    }
+
+    [Fact]
     public async Task GetResponseAsync_Throws_WhenCanonicalUsageFieldIsInvalid()
     {
         const string jsonResponse = """

@@ -984,6 +984,17 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 continue;
             }
 
+            if (type == "image")
+            {
+                additionalContents.Add(GeminiImageContentMapper.Map(
+                    contentObject,
+                    nameof(GetResponseAsync),
+                    contentPath,
+                    responseId: interactionId,
+                    modelId: modelId));
+                continue;
+            }
+
             if (GeminiBuiltInToolBridge.IsBuiltInToolCallType(type))
             {
                 additionalContents.Add(GeminiBuiltInToolBridge.CreateToolCall(contentObject));

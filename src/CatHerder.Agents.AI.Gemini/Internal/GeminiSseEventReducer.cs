@@ -246,6 +246,16 @@ internal sealed class GeminiSseEventReducer
                 EmitFunctionCallIfReady(content, updates, requireComplete: false);
                 break;
 
+            case "image":
+                updates.Add(CreateContentsUpdate([
+                    GeminiImageContentMapper.Map(
+                        delta,
+                        nameof(GeminiInteractionsChatClient.GetStreamingResponseAsync),
+                        "$.delta",
+                        sseEventType: "step.delta"),
+                ]));
+                break;
+
             default:
                 if (GeminiBuiltInToolBridge.IsBuiltInToolCallType(deltaType))
                 {
@@ -465,6 +475,18 @@ internal sealed class GeminiSseEventReducer
             if (type == "thought")
             {
                 EmitThoughtSummary(contentBlock, updates);
+                continue;
+            }
+
+            if (type == "image")
+            {
+                updates.Add(CreateContentsUpdate([
+                    GeminiImageContentMapper.Map(
+                        contentBlock,
+                        nameof(GeminiInteractionsChatClient.GetStreamingResponseAsync),
+                        "$.step.content[]",
+                        sseEventType: "step.start"),
+                ]));
             }
         }
     }
