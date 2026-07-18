@@ -357,7 +357,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             }
 
             var content = MapTurnContent(turn, turns)
-                .Where(item => item.Type == "text" || item.Type == "image")
+                .Where(item => item.Type is "text" or "image" or "document")
                 .ToList();
 
             steps.Add(new GeminiInteractionInputStep
@@ -387,7 +387,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 continue;
             }
 
-            if (item.Type == "text" || item.Type == "image")
+            if (item.Type is "text" or "image" or "document")
             {
                 modelOutputContent.Add(item);
             }
@@ -451,6 +451,14 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
                 case UriContent uriContent when uriContent.HasTopLevelMediaType("image"):
                     content.Add(MapImageContent(uriContent));
+                    break;
+
+                case DataContent dataContent when dataContent.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase):
+                    content.Add(MapDocumentContent(dataContent));
+                    break;
+
+                case UriContent uriContent when uriContent.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase):
+                    content.Add(MapDocumentContent(uriContent));
                     break;
 
                 case FunctionCallContent functionCall:
@@ -647,6 +655,14 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             {
                 items.Add(MapImageContent(uriContent));
             }
+            else if (item is DataContent pdfContent && pdfContent.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
+            {
+                items.Add(MapDocumentContent(pdfContent));
+            }
+            else if (item is UriContent pdfUriContent && pdfUriContent.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
+            {
+                items.Add(MapDocumentContent(pdfUriContent));
+            }
         }
 
         return items;
@@ -664,6 +680,20 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         Type = "image",
         MimeType = image.MediaType,
         Uri = image.Uri.ToString(),
+    };
+
+    private static GeminiInteractionContent MapDocumentContent(DataContent document) => new()
+    {
+        Type = "document",
+        MimeType = document.MediaType,
+        Data = Convert.ToBase64String(document.Data.ToArray()),
+    };
+
+    private static GeminiInteractionContent MapDocumentContent(UriContent document) => new()
+    {
+        Type = "document",
+        MimeType = document.MediaType,
+        Uri = document.Uri.ToString(),
     };
 
     private static GeminiInteractionGenerationConfig? MapChatOptionsToGenerationConfig(ChatOptions? options)
