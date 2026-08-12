@@ -19,6 +19,11 @@ public sealed class GeminiInteractionsChatClientOptions
 /// <summary>
 /// Gemini Interactions server-side built-in tool kinds.
 /// </summary>
+/// <remarks>
+/// Web search is not a member of this enum. Add a
+/// <see cref="T:Microsoft.Extensions.AI.HostedWebSearchTool"/> to the chat options tools
+/// collection and this client maps it to Gemini's <c>google_search</c> built-in tool.
+/// </remarks>
 public enum GeminiBuiltInToolKind
 {
     /// <summary>
@@ -30,11 +35,6 @@ public enum GeminiBuiltInToolKind
     /// Enables Gemini URL context retrieval.
     /// </summary>
     UrlContext,
-
-    /// <summary>
-    /// Enables Gemini Google Search grounding.
-    /// </summary>
-    GoogleSearch,
 
     /// <summary>
     /// Enables Gemini Google Maps grounding.

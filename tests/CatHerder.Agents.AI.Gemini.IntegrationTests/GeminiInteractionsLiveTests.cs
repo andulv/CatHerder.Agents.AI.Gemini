@@ -125,14 +125,11 @@ public sealed class GeminiInteractionsLiveTests
     public async Task BuiltInGoogleSearch_ReturnsLiveResponse()
     {
         var config = LiveGeminiConfiguration.Current;
-        using var client = config.CreateChatClient(new GeminiInteractionsChatClientOptions
-        {
-            BuiltInTools = [GeminiBuiltInToolKind.GoogleSearch],
-        });
+        using var client = config.CreateChatClient(GeminiInteractionsChatClientOptions.Empty);
 
-        var response = await client.GetResponseAsync([
-            new ChatMessage(ChatRole.User, "Use Google Search and answer with the current homepage title of example.com.")
-        ]);
+        var response = await client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, "Use Google Search and answer with the current homepage title of example.com.")],
+            new ChatOptions { Tools = [new HostedWebSearchTool()] });
 
         Assert.False(string.IsNullOrWhiteSpace(response.Text));
     }

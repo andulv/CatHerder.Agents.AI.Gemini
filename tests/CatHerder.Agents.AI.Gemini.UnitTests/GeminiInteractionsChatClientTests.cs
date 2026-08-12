@@ -48,7 +48,6 @@ public sealed class GeminiInteractionsChatClientTests
                 BuiltInTools =
                 [
                     GeminiBuiltInToolKind.UrlContext,
-                    GeminiBuiltInToolKind.GoogleSearch,
                     GeminiBuiltInToolKind.GoogleMaps,
                     GeminiBuiltInToolKind.CodeExecution,
                 ],
@@ -62,7 +61,6 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Collection(
             tools,
             item => Assert.Equal("url_context", item!["type"]!.GetValue<string>()),
-            item => Assert.Equal("google_search", item!["type"]!.GetValue<string>()),
             item => Assert.Equal("google_maps", item!["type"]!.GetValue<string>()),
             item => Assert.Equal("code_execution", item!["type"]!.GetValue<string>()));
     }
@@ -79,14 +77,14 @@ public sealed class GeminiInteractionsChatClientTests
             {
                 BuiltInTools =
                 [
-                    GeminiBuiltInToolKind.GoogleSearch,
-                    GeminiBuiltInToolKind.GoogleSearch,
                     GeminiBuiltInToolKind.UrlContext,
+                    GeminiBuiltInToolKind.UrlContext,
+                    GeminiBuiltInToolKind.GoogleMaps,
                 ],
             });
 
         await client.GetResponseAsync(
-            [new ChatMessage(ChatRole.User, "Use search and the provided URL")],
+            [new ChatMessage(ChatRole.User, "Use the provided URL and Maps data")],
             new ChatOptions { ConversationId = "interaction-123" });
 
         var payload = ParseCapturedPayload(handler);
@@ -95,8 +93,61 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Equal("interaction-123", payload["previous_interaction_id"]?.GetValue<string>());
         Assert.Collection(
             tools,
+            item => Assert.Equal("url_context", item!["type"]!.GetValue<string>()),
+            item => Assert.Equal("google_maps", item!["type"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_MapsHostedWebSearchTool_ToGoogleSearch()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        await client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, "What is in the news today?")],
+            new ChatOptions { Tools = [new HostedWebSearchTool()] });
+
+        var payload = ParseCapturedPayload(handler);
+        var tools = Assert.IsType<JsonArray>(payload["tools"]);
+
+        Assert.Collection(
+            tools,
+            item => Assert.Equal("google_search", item!["type"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_DeduplicatesHostedWebSearchTool_AndKeepsFunctionTools()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(
+            httpClient,
+            "gemini-3-flash-preview",
+            new GeminiInteractionsChatClientOptions
+            {
+                BuiltInTools = [GeminiBuiltInToolKind.UrlContext],
+            });
+
+        var function = AIFunctionFactory.Create(
+            (string query) => query,
+            name: "echo",
+            description: "Echoes the query back.");
+
+        await client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, "Search and echo")],
+            new ChatOptions { Tools = [new HostedWebSearchTool(), new HostedWebSearchTool(), function] });
+
+        var payload = ParseCapturedPayload(handler);
+        var tools = Assert.IsType<JsonArray>(payload["tools"]);
+
+        // url_context comes from BuiltInTools; google_search is deduplicated from two
+        // HostedWebSearchTool instances; the function tool is mapped last.
+        Assert.Collection(
+            tools,
+            item => Assert.Equal("url_context", item!["type"]!.GetValue<string>()),
             item => Assert.Equal("google_search", item!["type"]!.GetValue<string>()),
-            item => Assert.Equal("url_context", item!["type"]!.GetValue<string>()));
+            item => Assert.Equal("function", item!["type"]!.GetValue<string>()));
     }
 
     [Fact]
@@ -508,6 +559,59 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Equal("search-123", functionResult.CallId);
         Assert.Contains("rendered_content", functionResult.Result?.ToString());
         Assert.Contains("Example Weather", functionResult.Result?.ToString());
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_MapsBuiltInToolCall_WithoutArguments()
+    {
+        // The live Gemini Interactions API returns google_search_call with no arguments field.
+        // The mapper must tolerate that instead of throwing.
+        var responseJson = JsonSerializer.Serialize(new
+        {
+            id = "interaction-noargs",
+            model = "gemini-3-flash-preview",
+            steps = new object[]
+            {
+                new
+                {
+                    type = "google_search_call",
+                    id = "search-456",
+                },
+                new
+                {
+                    type = "google_search_result",
+                    call_id = "search-456",
+                    result = new[]
+                    {
+                        new { url = "https://example.com", title = "Example" },
+                    },
+                },
+                new
+                {
+                    type = "model_output",
+                    content = new[]
+                    {
+                        new { type = "text", text = "Grounded answer." },
+                    },
+                },
+            },
+        });
+
+        var handler = new RecordingHandler(HttpStatusCode.OK, responseJson);
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Search?")]);
+        var message = Assert.Single(response.Messages);
+
+        Assert.Equal("Grounded answer.", message.Text);
+
+        var functionCall = Assert.Single(message.Contents.OfType<FunctionCallContent>());
+        Assert.True(functionCall.InformationalOnly);
+        Assert.Equal("search-456", functionCall.CallId);
+        Assert.Equal("google_search", functionCall.Name);
+        Assert.NotNull(functionCall.Arguments);
+        Assert.Empty(functionCall.Arguments);
     }
 
     [Fact]

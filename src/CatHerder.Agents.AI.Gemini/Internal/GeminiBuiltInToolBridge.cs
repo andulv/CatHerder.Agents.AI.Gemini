@@ -21,9 +21,11 @@ internal static class GeminiBuiltInToolBridge
     {
         var toolName = GetToolName(GetRequiredString(payload, "type"), "_call");
         var callId = GetRequiredString(payload, "id");
-        var argumentsJson = payload["arguments"]?.ToJsonString() ??
-            throw new InvalidOperationException($"Gemini built-in tool call '{toolName}' has null arguments.");
-        var arguments = JsonSerializer.Deserialize<Dictionary<string, object?>>(argumentsJson);
+
+        // Built-in tools such as google_search legitimately carry no arguments.
+        var arguments = payload["arguments"] is { } argumentsNode
+            ? JsonSerializer.Deserialize<Dictionary<string, object?>>(argumentsNode.ToJsonString()) ?? new()
+            : new Dictionary<string, object?>();
 
         return new FunctionCallContent(callId, toolName, arguments)
         {

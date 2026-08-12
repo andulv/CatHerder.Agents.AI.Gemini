@@ -786,6 +786,20 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         {
             foreach (var tool in configuredTools)
             {
+                // Map the portable MEAI HostedWebSearchTool to Gemini's google_search built-in tool.
+                if (tool is HostedWebSearchTool)
+                {
+                    const string googleSearchType = "google_search";
+                    if (!tools.Any(t => string.Equals(t.Type, googleSearchType, StringComparison.Ordinal)))
+                    {
+                        tools.Add(new GeminiInteractionTool
+                        {
+                            Type = googleSearchType,
+                        });
+                    }
+                    continue;
+                }
+
                 if (tool is not AIFunctionDeclaration function)
                 {
                     throw new NotSupportedException($"Gemini Interactions does not support chat tool type '{tool.GetType().Name}'.");
@@ -821,7 +835,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         {
             GeminiBuiltInToolKind.CodeExecution => "code_execution",
             GeminiBuiltInToolKind.UrlContext => "url_context",
-            GeminiBuiltInToolKind.GoogleSearch => "google_search",
             GeminiBuiltInToolKind.GoogleMaps => "google_maps",
             _ => throw new ArgumentOutOfRangeException(nameof(toolKind), toolKind, "Unsupported Gemini built-in tool."),
         };

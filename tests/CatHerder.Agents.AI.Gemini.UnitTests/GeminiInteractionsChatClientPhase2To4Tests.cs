@@ -91,11 +91,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
         using var httpClient = CreateHttpClient(handler);
         using var client = new GeminiInteractionsChatClient(
             httpClient,
-            "gemini-3-flash-preview",
-            new GeminiInteractionsChatClientOptions
-            {
-                BuiltInTools = [GeminiBuiltInToolKind.GoogleSearch],
-            });
+            "gemini-3-flash-preview");
 
         var tool = AIFunctionFactory.Create(
             (string location) => $"Sunny in {location}",
@@ -114,7 +110,7 @@ public sealed class GeminiInteractionsChatClientPhase2To4Tests
             messages,
             new ChatOptions
             {
-                Tools = [tool],
+                Tools = [new HostedWebSearchTool(), tool],
                 ConversationId = "interaction-9",
                 Temperature = 0.2f,
                 MaxOutputTokens = 123,
