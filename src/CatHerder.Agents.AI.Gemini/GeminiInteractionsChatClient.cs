@@ -179,8 +179,25 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         {
             if (!response.IsSuccessStatusCode)
             {
+                // The error body says why (for example an unknown previous interaction id).
+                string body;
+                try
+                {
+                    body = (await response.Content.ReadAsStringAsync(cancellationToken)).Trim();
+                }
+                catch (Exception ex) when (ex is HttpRequestException or IOException)
+                {
+                    body = "";
+                }
+
+                if (body.Length > 1000)
+                {
+                    body = body[..1000] + "...";
+                }
+
                 throw new GeminiSseNegotiationException(
-                    $"Gemini Interactions SSE negotiation failed with HTTP {(int)response.StatusCode} ({response.StatusCode}).",
+                    $"Gemini Interactions SSE negotiation failed with HTTP {(int)response.StatusCode} ({response.StatusCode})."
+                        + (body.Length > 0 ? " " + body : ""),
                     response.StatusCode);
             }
 
@@ -290,7 +307,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             Input = MapInput(normalized.InputTurns),
             GenerationConfig = MapChatOptionsToGenerationConfig(options),
             ResponseFormat = MapResponseFormat(options?.ResponseFormat),
-            Tools = MapTools(options, _options.BuiltInTools),
+            Tools = MapTools(options),
             PreviousInteractionId = options?.ConversationId,
             Stream = stream ? true : null,
         };
@@ -631,7 +648,9 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             return MapFunctionResultContent(contentItems);
         }
 
-        return result;
+        // Structured results are data for the model, not typed result parts. Their properties
+        // (e.g. "type") would collide with the part discriminator on the wire, so send them as text.
+        return JsonSerializer.Serialize(result, JsonSerializerOptions.Default);
     }
 
     private static List<GeminiInteractionContent> MapFunctionResultContent(IEnumerable<AIContent> contentItems)
@@ -767,34 +786,31 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         };
     }
 
-    private static IReadOnlyList<GeminiInteractionTool>? MapTools(ChatOptions? options, IReadOnlyList<GeminiBuiltInToolKind>? builtInTools)
+    private static IReadOnlyList<GeminiInteractionTool>? MapTools(ChatOptions? options)
     {
         var tools = new List<GeminiInteractionTool>();
-
-        if (builtInTools is { Count: > 0 })
-        {
-            foreach (var toolKind in builtInTools.Distinct())
-            {
-                tools.Add(new GeminiInteractionTool
-                {
-                    Type = MapBuiltInToolType(toolKind),
-                });
-            }
-        }
 
         if (options?.Tools is { Count: > 0 } configuredTools)
         {
             foreach (var tool in configuredTools)
             {
-                // Map the portable MEAI HostedWebSearchTool to Gemini's google_search built-in tool.
-                if (tool is HostedWebSearchTool)
+                // Server-side tools: portable MEAI hosted tools first, then Gemini-only tools.
+                // Each built-in type is sent once.
+                var builtInType = tool switch
                 {
-                    const string googleSearchType = "google_search";
-                    if (!tools.Any(t => string.Equals(t.Type, googleSearchType, StringComparison.Ordinal)))
+                    HostedWebSearchTool => "google_search",
+                    HostedCodeInterpreterTool => "code_execution",
+                    GeminiBuiltInTool geminiTool => geminiTool.ToolType,
+                    _ => null,
+                };
+
+                if (builtInType is not null)
+                {
+                    if (!tools.Any(t => string.Equals(t.Type, builtInType, StringComparison.Ordinal)))
                     {
                         tools.Add(new GeminiInteractionTool
                         {
-                            Type = googleSearchType,
+                            Type = builtInType,
                         });
                     }
                     continue;
@@ -827,17 +843,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     {
         using var document = JsonDocument.Parse(schema.GetRawText());
         return document.RootElement.Clone();
-    }
-
-    private static string MapBuiltInToolType(GeminiBuiltInToolKind toolKind)
-    {
-        return toolKind switch
-        {
-            GeminiBuiltInToolKind.CodeExecution => "code_execution",
-            GeminiBuiltInToolKind.UrlContext => "url_context",
-            GeminiBuiltInToolKind.GoogleMaps => "google_maps",
-            _ => throw new ArgumentOutOfRangeException(nameof(toolKind), toolKind, "Unsupported Gemini built-in tool."),
-        };
     }
 
     private static ChatResponse MapInteractionToChatResponse(JsonObject interaction, ILogger? logger)

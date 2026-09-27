@@ -50,18 +50,23 @@ await foreach (var update in client.GetStreamingResponseAsync([
 
 ## Built-In Tools
 
-Gemini server-side built-in tools can be requested through `GeminiInteractionsChatClientOptions`:
+Server-side tools are requested per call through `ChatOptions.Tools`, the same way as with the
+official MEAI adapters (OpenAI, Anthropic, Google.GenAI):
+
+| Tool | Gemini tool type |
+|---|---|
+| `HostedWebSearchTool` | `google_search` |
+| `HostedCodeInterpreterTool` | `code_execution` |
+| `GeminiBuiltInTool.UrlContext` | `url_context` |
+| `GeminiBuiltInTool.GoogleMaps` | `google_maps` |
 
 ```csharp
-var client = GeminiInteractionsChatClientExtensions.CreateGeminiInteractionsChatClient(
-    apiKey,
-    "gemini-3.1-pro-preview",
-    new GeminiInteractionsChatClientOptions
-    {
-        BuiltInTools = [GeminiBuiltInToolKind.GoogleSearch]
-    });
+var response = await client.GetResponseAsync(
+    [new ChatMessage(ChatRole.User, "Search the web and compute the answer in Python.")],
+    new ChatOptions { Tools = [new HostedWebSearchTool(), new HostedCodeInterpreterTool(), GeminiBuiltInTool.UrlContext] });
 ```
 
+Other `AITool` types that are not `AIFunctionDeclaration` throw `NotSupportedException`.
 Built-in tool calls and results are represented as informational `FunctionCallContent` / `FunctionResultContent` values in response content.
 
 ## Integration Tests

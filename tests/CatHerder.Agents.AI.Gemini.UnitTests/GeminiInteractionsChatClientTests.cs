@@ -23,7 +23,7 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
-    public async Task GetResponseAsync_OmitsTools_WhenNoGeminiBuiltInToolsConfigured()
+    public async Task GetResponseAsync_OmitsTools_WhenNoToolsRequested()
     {
         var handler = new RecordingHandler();
         using var httpClient = CreateHttpClient(handler);
@@ -36,24 +36,18 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
-    public async Task GetResponseAsync_IncludesConfiguredGeminiBuiltInTools()
+    public async Task GetResponseAsync_MapsHostedAndGeminiBuiltInTools_InOrder()
     {
         var handler = new RecordingHandler();
         using var httpClient = CreateHttpClient(handler);
-        using var client = new GeminiInteractionsChatClient(
-            httpClient,
-            "gemini-3-flash-preview",
-            new GeminiInteractionsChatClientOptions
-            {
-                BuiltInTools =
-                [
-                    GeminiBuiltInToolKind.UrlContext,
-                    GeminiBuiltInToolKind.GoogleMaps,
-                    GeminiBuiltInToolKind.CodeExecution,
-                ],
-            });
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
-        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Summarize https://www.example.com")]);
+        await client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, "Summarize https://www.example.com")],
+            new ChatOptions
+            {
+                Tools = [GeminiBuiltInTool.UrlContext, GeminiBuiltInTool.GoogleMaps, new HostedCodeInterpreterTool()],
+            });
 
         var payload = ParseCapturedPayload(handler);
         var tools = Assert.IsType<JsonArray>(payload["tools"]);
@@ -66,26 +60,25 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
-    public async Task GetResponseAsync_DeduplicatesConfiguredGeminiBuiltInTools()
+    public async Task GetResponseAsync_DeduplicatesBuiltInTools()
     {
         var handler = new RecordingHandler();
         using var httpClient = CreateHttpClient(handler);
-        using var client = new GeminiInteractionsChatClient(
-            httpClient,
-            "gemini-3-flash-preview",
-            new GeminiInteractionsChatClientOptions
-            {
-                BuiltInTools =
-                [
-                    GeminiBuiltInToolKind.UrlContext,
-                    GeminiBuiltInToolKind.UrlContext,
-                    GeminiBuiltInToolKind.GoogleMaps,
-                ],
-            });
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
         await client.GetResponseAsync(
-            [new ChatMessage(ChatRole.User, "Use the provided URL and Maps data")],
-            new ChatOptions { ConversationId = "interaction-123" });
+            [new ChatMessage(ChatRole.User, "Use the provided URL and run code")],
+            new ChatOptions
+            {
+                ConversationId = "interaction-123",
+                Tools =
+                [
+                    GeminiBuiltInTool.UrlContext,
+                    new GeminiBuiltInTool(GeminiBuiltInToolKind.UrlContext),
+                    new HostedCodeInterpreterTool(),
+                    new HostedCodeInterpreterTool(),
+                ],
+            });
 
         var payload = ParseCapturedPayload(handler);
         var tools = Assert.IsType<JsonArray>(payload["tools"]);
@@ -94,7 +87,19 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Collection(
             tools,
             item => Assert.Equal("url_context", item!["type"]!.GetValue<string>()),
-            item => Assert.Equal("google_maps", item!["type"]!.GetValue<string>()));
+            item => Assert.Equal("code_execution", item!["type"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_RejectsUnsupportedToolType()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        await Assert.ThrowsAsync<NotSupportedException>(() => client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, "Hello")],
+            new ChatOptions { Tools = [new HostedFileSearchTool()] }));
     }
 
     [Fact]
@@ -121,13 +126,7 @@ public sealed class GeminiInteractionsChatClientTests
     {
         var handler = new RecordingHandler();
         using var httpClient = CreateHttpClient(handler);
-        using var client = new GeminiInteractionsChatClient(
-            httpClient,
-            "gemini-3-flash-preview",
-            new GeminiInteractionsChatClientOptions
-            {
-                BuiltInTools = [GeminiBuiltInToolKind.UrlContext],
-            });
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
         var function = AIFunctionFactory.Create(
             (string query) => query,
@@ -136,12 +135,12 @@ public sealed class GeminiInteractionsChatClientTests
 
         await client.GetResponseAsync(
             [new ChatMessage(ChatRole.User, "Search and echo")],
-            new ChatOptions { Tools = [new HostedWebSearchTool(), new HostedWebSearchTool(), function] });
+            new ChatOptions { Tools = [GeminiBuiltInTool.UrlContext, new HostedWebSearchTool(), new HostedWebSearchTool(), function] });
 
         var payload = ParseCapturedPayload(handler);
         var tools = Assert.IsType<JsonArray>(payload["tools"]);
 
-        // url_context comes from BuiltInTools; google_search is deduplicated from two
+        // google_search is deduplicated from two
         // HostedWebSearchTool instances; the function tool is mapped last.
         Assert.Collection(
             tools,
@@ -294,6 +293,31 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Equal("get_weather", functionResult["name"]!.GetValue<string>());
         Assert.Equal("call-1", functionResult["call_id"]!.GetValue<string>());
         Assert.Equal("tool-result", functionResult["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_SerializesStructuredFunctionResultAsText()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var messages = new ChatMessage[]
+        {
+            new(ChatRole.User, "List the files"),
+            new(ChatRole.Assistant, [new FunctionCallContent("call-1", "list_files", new Dictionary<string, object?>())]),
+            // A structured result: its "type" property must not become a typed part on the wire.
+            new(ChatRole.Tool, [new FunctionResultContent("call-1", new[] { new { name = "a.md", type = "file" } })]),
+        };
+
+        await client.GetResponseAsync(messages);
+
+        var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
+        var functionResult = Assert.IsType<JsonObject>(input[2]);
+        var result = functionResult["result"]!.GetValue<string>();
+
+        Assert.Contains("a.md", result);
+        Assert.DoesNotContain("\"type\":\"function_result\"", result);
     }
 
     [Fact]
