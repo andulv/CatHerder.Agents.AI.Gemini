@@ -775,4 +775,53 @@ public sealed class GeminiInteractionsChatClientTests
         }
     }
 
+    [Theory]
+    [InlineData(ReasoningEffort.None, "minimal")]
+    [InlineData(ReasoningEffort.Low, "low")]
+    [InlineData(ReasoningEffort.Medium, "medium")]
+    [InlineData(ReasoningEffort.High, "high")]
+    [InlineData(ReasoningEffort.ExtraHigh, "high")]
+    public void MapThinkingLevel_TypedEffortIsAuthoritative(ReasoningEffort effort, string expected)
+    {
+        var options = new ChatOptions { Reasoning = new ReasoningOptions { Effort = effort } };
+
+        Assert.Equal(expected, GeminiInteractionsChatClient.MapThinkingLevel(options));
+    }
+
+    [Fact]
+    public void MapThinkingLevel_RawEffortExtendsBeyondTheTypedEnumButNeverOverridesIt()
+    {
+        // A level the typed enum has no member for (an extension value) is passed through.
+        var extended = new ChatOptions
+        {
+            AdditionalProperties = new() { ["reasoning.effort"] = "minimal" },
+        };
+        Assert.Equal("minimal", GeminiInteractionsChatClient.MapThinkingLevel(extended));
+
+        // "none" has no API value: minimal is the closest documented level (little to no thinking).
+        var none = new ChatOptions
+        {
+            AdditionalProperties = new() { ["reasoning.effort"] = "none" },
+        };
+        Assert.Equal("minimal", GeminiInteractionsChatClient.MapThinkingLevel(none));
+
+        // An explicit typed value wins over a raw extension value.
+        var typed = new ChatOptions
+        {
+            Reasoning = new ReasoningOptions { Effort = ReasoningEffort.High },
+            AdditionalProperties = new() { ["reasoning.effort"] = "low" },
+        };
+        Assert.Equal("high", GeminiInteractionsChatClient.MapThinkingLevel(typed));
+    }
+
+    [Fact]
+    public void MapThinkingLevel_DisabledReasoningMapsToMinimal()
+    {
+        var options = new ChatOptions
+        {
+            AdditionalProperties = new() { ["reasoning.enabled"] = false },
+        };
+
+        Assert.Equal("minimal", GeminiInteractionsChatClient.MapThinkingLevel(options));
+    }
 }

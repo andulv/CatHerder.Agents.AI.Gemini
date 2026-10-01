@@ -739,7 +739,16 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             : generationConfig;
     }
 
-    private static string? MapThinkingLevel(ChatOptions? options)
+    /// <summary>
+    /// Maps reasoning options to the Interactions thinking level. The typed
+    /// <see cref="ReasoningOptions.Effort"/> is authoritative; the AdditionalProperties value
+    /// is an extension channel for levels the typed enum has no member for (it never overrides
+    /// an explicit typed value). The API's enum is minimal/low/medium/high — there is no off
+    /// value, so "no thinking" maps to minimal (little to no thinking). An explicit off request
+    /// (<c>reasoning.effort = none</c> or <c>reasoning.enabled = false</c>) is honored the same
+    /// way.
+    /// </summary>
+    internal static string? MapThinkingLevel(ChatOptions? options)
     {
         if (options is null)
         {
@@ -752,6 +761,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         {
             level = reasoning.Effort switch
             {
+                ReasoningEffort.None => "minimal",
                 ReasoningEffort.Low => "low",
                 ReasoningEffort.Medium => "medium",
                 ReasoningEffort.High => "high",
@@ -760,11 +770,20 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             };
         }
 
-        if (options.AdditionalProperties?.TryGetValue("reasoning.effort", out var rawEffort) == true
+        if (level is null
+            && options.AdditionalProperties?.TryGetValue("reasoning.effort", out var rawEffort) == true
             && rawEffort is string rawEffortString
             && !string.IsNullOrWhiteSpace(rawEffortString))
         {
-            level = rawEffortString.Trim().ToLowerInvariant();
+            var raw = rawEffortString.Trim().ToLowerInvariant();
+            level = raw == "none" ? "minimal" : raw;
+        }
+
+        if (level is null
+            && options.AdditionalProperties?.TryGetValue("reasoning.enabled", out var enabled) == true
+            && enabled is bool enabledBool && !enabledBool)
+        {
+            level = "minimal";
         }
 
         return level;
