@@ -343,7 +343,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
         if (turns.Count == 1 && turns[0].Role == ChatRole.User)
         {
-            var singleUserContent = MapTurnContent(turns[0], turns);
+            var singleUserContent = MapTurnContent(turns[0], turns, rejectUnsupportedContent: true);
             if (singleUserContent.Count == 1 && singleUserContent[0].Type == "text")
             {
                 return singleUserContent[0].Text ?? string.Empty;
@@ -373,8 +373,8 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 continue;
             }
 
-            var content = MapTurnContent(turn, turns)
-                .Where(item => item.Type is "text" or "image" or "document")
+            var content = MapTurnContent(turn, turns, rejectUnsupportedContent: true)
+                .Where(item => item.Type is "text" or "image" or "document" or "audio")
                 .ToList();
 
             steps.Add(new GeminiInteractionInputStep
@@ -390,7 +390,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     private static void AddAssistantInputSteps(ChatMessage turn, IReadOnlyList<ChatMessage> turns, List<GeminiInteractionInputStep> steps)
     {
         var modelOutputContent = new List<GeminiInteractionContent>();
-        foreach (var item in MapTurnContent(turn, turns))
+        foreach (var item in MapTurnContent(turn, turns, rejectUnsupportedContent: false))
         {
             if (item.Type == "function_call")
             {
@@ -422,7 +422,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
     private static void AddFunctionResultInputSteps(ChatMessage turn, IReadOnlyList<ChatMessage> turns, List<GeminiInteractionInputStep> steps)
     {
-        foreach (var item in MapTurnContent(turn, turns).Where(item => item.Type == "function_result"))
+        foreach (var item in MapTurnContent(turn, turns, rejectUnsupportedContent: false).Where(item => item.Type == "function_result"))
         {
             steps.Add(new GeminiInteractionInputStep
             {
@@ -434,7 +434,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
     }
 
-    private static List<GeminiInteractionContent> MapTurnContent(ChatMessage message, IReadOnlyList<ChatMessage> turns)
+    private static List<GeminiInteractionContent> MapTurnContent(ChatMessage message, IReadOnlyList<ChatMessage> turns, bool rejectUnsupportedContent)
     {
         var content = new List<GeminiInteractionContent>();
         var hasTextContent = false;
@@ -477,6 +477,20 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 case UriContent uriContent when uriContent.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase):
                     content.Add(MapDocumentContent(uriContent));
                     break;
+
+                case DataContent dataContent when dataContent.HasTopLevelMediaType("audio"):
+                    content.Add(MapAudioContent(dataContent));
+                    break;
+
+                case UriContent uriContent when uriContent.HasTopLevelMediaType("audio"):
+                    content.Add(MapAudioContent(uriContent));
+                    break;
+
+                case DataContent dataContent when rejectUnsupportedContent:
+                    throw UnsupportedMediaType(dataContent.MediaType);
+
+                case UriContent uriContent when rejectUnsupportedContent:
+                    throw UnsupportedMediaType(uriContent.MediaType);
 
                 case FunctionCallContent functionCall:
                     RememberFunctionName(functionCall.CallId, functionCall.Name);
@@ -706,6 +720,23 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         MimeType = document.MediaType,
         Uri = document.Uri.ToString(),
     };
+
+    private static GeminiInteractionContent MapAudioContent(DataContent audio) => new()
+    {
+        Type = "audio",
+        MimeType = audio.MediaType,
+        Data = Convert.ToBase64String(audio.Data.ToArray()),
+    };
+
+    private static GeminiInteractionContent MapAudioContent(UriContent audio) => new()
+    {
+        Type = "audio",
+        MimeType = audio.MediaType,
+        Uri = audio.Uri.ToString(),
+    };
+
+    private static NotSupportedException UnsupportedMediaType(string? mediaType) =>
+        new($"Gemini Interactions does not support media type '{mediaType}' in user messages. Supported media types are image/*, audio/*, and application/pdf.");
 
     private static GeminiInteractionGenerationConfig? MapChatOptionsToGenerationConfig(ChatOptions? options)
     {

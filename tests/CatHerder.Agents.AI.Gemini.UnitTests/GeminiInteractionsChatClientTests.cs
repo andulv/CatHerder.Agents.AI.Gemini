@@ -267,6 +267,83 @@ public sealed class GeminiInteractionsChatClientTests
         Assert.Equal("JVBERi0xLjcK", document["data"]!.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task GetResponseAsync_SerializesUserAudioContent_AsAudioPart(bool inline)
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        AIContent audio = inline
+            ? new DataContent(new byte[] { 0x01, 0x02, 0x03 }, "audio/wav")
+            : new UriContent(new Uri("https://storage.example.com/clips/demo.wav"), "audio/wav");
+
+        await client.GetResponseAsync(
+        [
+            new ChatMessage(ChatRole.User, "Hello"),
+            new ChatMessage(ChatRole.Assistant, "Hi there."),
+            new ChatMessage(ChatRole.User, [new TextContent("Describe this audio."), audio]),
+        ]);
+
+        var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
+        var userStep = Assert.IsType<JsonObject>(input[2]);
+        var content = Assert.IsType<JsonArray>(userStep["content"]);
+        var audioPart = Assert.IsType<JsonObject>(content[1]);
+
+        Assert.Equal("audio", audioPart["type"]!.GetValue<string>());
+        Assert.Equal("audio/wav", audioPart["mime_type"]!.GetValue<string>());
+        if (inline)
+        {
+            Assert.Equal("AQID", audioPart["data"]!.GetValue<string>());
+            Assert.Null(audioPart["uri"]);
+        }
+        else
+        {
+            Assert.Equal("https://storage.example.com/clips/demo.wav", audioPart["uri"]!.GetValue<string>());
+            Assert.Null(audioPart["data"]);
+        }
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_Throws_WhenUserContentHasUnsupportedMediaType()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(async () =>
+            await client.GetResponseAsync(
+                [new ChatMessage(ChatRole.User, [new TextContent("Watch this video."), new DataContent(new byte[] { 1, 2, 3 }, "video/mp4")])]));
+
+        Assert.Contains("video/mp4", ex.Message);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_DropsUnsupportedMediaInAssistantTurns()
+    {
+        // Documented behaviour: only user turns reject unmappable media. Assistant turns are
+        // replayed history; the API has no audio/video parts in model_output steps, so
+        // unmappable binary content there is dropped instead of throwing.
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        await client.GetResponseAsync(
+        [
+            new ChatMessage(ChatRole.Assistant, [new TextContent("Here is a clip."), new DataContent(new byte[] { 1, 2, 3 }, "video/mp4")]),
+            new ChatMessage(ChatRole.User, "Tell me more."),
+        ]);
+
+        var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
+        var assistantStep = Assert.IsType<JsonObject>(input[0]);
+        var content = Assert.IsType<JsonArray>(assistantStep["content"]);
+        Assert.Single(content);
+        Assert.Equal("text", content[0]!["type"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task GetResponseAsync_SerializesFunctionResultMessageAsFunctionResultContent()
     {
