@@ -69,6 +69,43 @@ var response = await client.GetResponseAsync(
 Other `AITool` types that are not `AIFunctionDeclaration` throw `NotSupportedException`.
 Built-in tool calls and results are represented as informational `FunctionCallContent` / `FunctionResultContent` values in response content.
 
+## Multimodal Input
+
+User messages can include image, PDF, and audio content as `DataContent` (inline bytes) or
+`UriContent` (a URI). These map to the corresponding Interactions content parts:
+
+| MEAI content | Media types | Interactions part |
+|---|---|---|
+| `DataContent` / `UriContent` | `image/*` | `image` (inline `data` or `uri`) |
+| `DataContent` / `UriContent` | `application/pdf` | `document` (inline `data` or `uri`) |
+| `DataContent` / `UriContent` | `audio/*` | `audio` (inline `data` or `uri`) |
+
+```csharp
+var response = await client.GetResponseAsync([
+    new ChatMessage(ChatRole.User, [
+        new TextContent("Transcribe or describe this audio."),
+        new DataContent(File.ReadAllBytes("clip.wav"), "audio/wav"),
+    ]),
+]);
+```
+
+The media type is passed through as-is (e.g. `audio/wav`, `audio/mp3`); which formats the
+API accepts is documented by Google (wav, mp3, aiff, aac, ogg, flac on the Interactions
+API audio page). Audio is input-only; model audio output is not mapped.
+
+Other `DataContent` / `UriContent` media types in user messages (e.g. `video/*`) throw
+`NotSupportedException` instead of being silently dropped. Media in assistant-turn and
+function-result content is dropped, because the API's `model_output` / `function_result`
+steps do not carry audio parts.
+
+### Inline request size limit
+
+The Interactions API accepts at most 20 MB of inline content per request (prompts and all
+inline files included). `GeminiInteractionsChatClientOptions.MaxInlineRequestBytes`
+(default `20_000_000`) makes the client reject oversized requests with
+`GeminiRequestSizeExceededException` before any HTTP call is made; set it to `null` to
+disable the check.
+
 ## Integration Tests
 
 Live tests are skipped unless `GOOGLE_API_KEY` and `GEMINI_INTERACTIONS_MODEL` are set.
@@ -86,6 +123,7 @@ Optional:
 ## Current Limitations
 
 - Google AI Studio API-key authentication only.
+- Audio is input-only; model audio output is not mapped.
 - Vertex AI auth is not implemented yet.
 - Public low-level request/response DTOs are intentionally internal.
 - Streaming event handling is based on observed Interactions SSE shapes and may evolve with the API.

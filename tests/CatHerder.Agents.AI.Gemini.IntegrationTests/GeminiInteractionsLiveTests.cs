@@ -87,6 +87,23 @@ public sealed class GeminiInteractionsLiveTests
     }
 
     [LiveGeminiFact]
+    public async Task GetResponseAsync_AudioInput_ReturnsAnswerAboutAudio()
+    {
+        using var client = LiveGeminiConfiguration.Current.CreateChatClient();
+        var clip = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "audio", "clip.wav"));
+
+        var response = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, [
+                new TextContent("Is this audio clip silent or does it contain sound? Answer with exactly one word: silent or sound."),
+                new DataContent(clip, "audio/wav"),
+            ]),
+        ]);
+
+        Assert.False(string.IsNullOrWhiteSpace(response.Text));
+        Assert.Contains("sound", response.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [LiveGeminiFact]
     public async Task GetStreamingResponseAsync_ReturnsTextFromRealApi()
     {
         using var client = LiveGeminiConfiguration.Current.CreateChatClient();

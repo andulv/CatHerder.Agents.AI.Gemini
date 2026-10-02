@@ -33,4 +33,8 @@
     <ProjectReference Include="..\..\src\CatHerder.Agents.AI.Gemini\CatHerder.Agents.AI.Gemini.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="audio/clip.wav" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
