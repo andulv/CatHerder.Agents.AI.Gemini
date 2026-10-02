@@ -3,7 +3,7 @@ type: plan-implementation
 description: "Plan 064 - Map inline audio input to Interactions audio parts, reject unmappable content, pre-flight size check"
 status: active
 created: 2026-10-02T20:20:00+02:00
-updated: 2026-10-02T20:41:33+02:00
+updated: 2026-10-02T20:46:53+02:00
 ---
 # Plan 064 Implementation — Audio Input Mapping
 
@@ -25,7 +25,7 @@ Allowed task statuses: not-started, in-progress, blocked, implemented, reviewed,
 | Status | Task |
 |---|---|
 | `implemented` | [Task P064-T01: map audio input, reject unmappable content](tasks/task064-01-audio-mapping.md) |
-| `not-started` | [Task P064-T02: pre-flight inline request size check](tasks/task064-02-request-size-preflight.md) |
+| `implemented` | [Task P064-T02: pre-flight inline request size check](tasks/task064-02-request-size-preflight.md) |
 | `not-started` | [Task P064-T03: live audio verification, m4a check, README](tasks/task064-03-live-verification-readme.md) |
 
 ## 2. Task Parallelism

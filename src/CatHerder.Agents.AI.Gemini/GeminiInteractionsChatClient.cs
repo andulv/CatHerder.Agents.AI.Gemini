@@ -272,9 +272,22 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
     private HttpRequestMessage CreateInteractionRequestMessage(GeminiInteractionRequest request, bool acceptEventStream)
     {
+        var json = JsonSerializer.Serialize(request, JsonOptions);
+        var byteCount = Encoding.UTF8.GetByteCount(json);
+
+        if (_options.MaxInlineRequestBytes is { } maxInlineRequestBytes && byteCount > maxInlineRequestBytes)
+        {
+            throw new GeminiRequestSizeExceededException(
+                $"The serialized Gemini Interactions request is {byteCount} bytes, which exceeds the inline request limit of {maxInlineRequestBytes} bytes. "
+                + $"The Gemini Interactions API accepts at most 20 MB of inline content per request (https://ai.google.dev/gemini-api/docs/audio). "
+                + "Reduce the inline payload, raise GeminiInteractionsChatClientOptions.MaxInlineRequestBytes, or disable the check by setting it to null.",
+                byteCount,
+                maxInlineRequestBytes);
+        }
+
         var requestMessage = new HttpRequestMessage(HttpMethod.Post, acceptEventStream ? "interactions?alt=sse" : "interactions")
         {
-            Content = new StringContent(JsonSerializer.Serialize(request, JsonOptions), Encoding.UTF8, "application/json"),
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
         };
 
         requestMessage.Headers.TryAddWithoutValidation(ApiRevisionHeaderName, ApiRevisionHeaderValue);

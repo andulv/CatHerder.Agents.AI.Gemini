@@ -345,6 +345,68 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
+    public async Task GetResponseAsync_Throws_WhenRequestExceedsMaxInlineRequestBytes()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(
+            httpClient,
+            "gemini-3-flash-preview",
+            new GeminiInteractionsChatClientOptions { MaxInlineRequestBytes = 10 });
+
+        var ex = await Assert.ThrowsAsync<GeminiRequestSizeExceededException>(async () =>
+            await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]));
+
+        Assert.Contains(ex.RequestedBytes.ToString(), ex.Message);
+        Assert.Contains("10", ex.Message);
+        Assert.Contains("20 MB", ex.Message);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetStreamingResponseAsync_Throws_WhenRequestExceedsMaxInlineRequestBytes()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(
+            httpClient,
+            "gemini-3-flash-preview",
+            new GeminiInteractionsChatClientOptions { MaxInlineRequestBytes = 10 });
+
+        var updates = client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hello")]);
+        var enumerator = updates.GetAsyncEnumerator();
+
+        try
+        {
+            await Assert.ThrowsAsync<GeminiRequestSizeExceededException>(async () =>
+                await enumerator.MoveNextAsync());
+        }
+        finally
+        {
+            await enumerator.DisposeAsync();
+        }
+
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_SendsOversizeRequest_WhenMaxInlineRequestBytesIsNull()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(
+            httpClient,
+            "gemini-3-flash-preview",
+            new GeminiInteractionsChatClientOptions { MaxInlineRequestBytes = null });
+
+        // ~20 MB of base64 payload: over the documented inline limit, but null disables the check.
+        await client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, [new DataContent(new byte[15_000_001], "image/png")])]);
+
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
     public async Task GetResponseAsync_SerializesFunctionResultMessageAsFunctionResultContent()
     {
         var handler = new RecordingHandler();
