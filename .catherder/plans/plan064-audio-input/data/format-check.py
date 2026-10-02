@@ -6,8 +6,8 @@ request, once per format/media type pair, and records accepted/rejected per pair
 
 Requires: GOOGLE_API_KEY and GEMINI_INTERACTIONS_MODEL environment variables.
 Usage: python3 format-check.py [output.md]
-Writes results to the given markdown file (default: format-check-results.md next
-to this script) and prints a summary table to stdout.
+Writes results to the given markdown file (default: format-check.md next to
+this script) and prints a summary table to stdout.
 """
 
 import base64
@@ -104,7 +104,7 @@ def main() -> int:
         print(f"clip not found: {clip_wav}", file=sys.stderr)
         return 2
 
-    out_file = sys.argv[1] if len(sys.argv) > 1 else "format-check-results.md"
+    out_file = sys.argv[1] if len(sys.argv) > 1 else "format-check.md"
     results = []
 
     with tempfile.TemporaryDirectory() as tmp:

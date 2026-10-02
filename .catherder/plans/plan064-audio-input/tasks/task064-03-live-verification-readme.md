@@ -67,7 +67,7 @@ Work done:
   "sound" (case-insensitive). Runs under the existing `[LiveGeminiFact]` credential gate.
 - Format scratch check (research task, not a project test):
   `../data/format-check.py` converts the clip per format and sends each inline as an audio
-  part; results in `../data/format-check-results.md`.
+  part; results in `../data/format-check.md`.
 - README: new "Multimodal Input" section (content → part table, inline + URI examples,
   pass-through media type note, `NotSupportedException` behaviour for other user media,
   assistant/function-result drop behaviour) and a "Inline request size limit" subsection
@@ -105,7 +105,7 @@ By: pi (gpt-5.x) @ 2026-10-02T20:56:23+02:00
   passed (filtered run: "Passed: 1, Total: 1").
 - `rg -n "GetResponseAsync_AudioInput_ReturnsAnswerAboutAudio" tests/` →
   `GeminiInteractionsLiveTests.cs:90`.
-- Format scratch check: 9/9 accepted, recorded in `../data/format-check-results.md`.
+- Format scratch check: 9/9 accepted, recorded in `../data/format-check.md`.
 
 ## Reviewer Verification
 By: <agent/model-or-unknown> @ <YYYY-MM-DDTHH:MM:SS+HH:MM>
