@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CatHerder.Agents.AI.Gemini;
+using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 
 namespace CatHerder.Agents.AI.Gemini.UnitTests;
@@ -548,6 +549,170 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
+    public async Task AgentRun_DoesNotRecord_CarriedRequestCalls()
+    {
+        // Carried history (any provider) must not grow the map: the result and its call are
+        // in the same request, so the transcript lookup resolves the name. Pinned on the
+        // failure path — a failed request never prunes, so a recorded carried call would
+        // survive here (this is the pin for the dominant growth source, plan065 outcome 1).
+        var handler = new SequentialHandler(
+            (HttpStatusCode.InternalServerError, """{"error":{"code":500,"status":"INTERNAL"}}""", "application/json"));
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        var agent = client.AsAIAgent();
+        var session = await agent.CreateSessionAsync();
+
+        var messages = new ChatMessage[]
+        {
+            new(ChatRole.User, "Use the tool"),
+            new(ChatRole.Assistant, [new FunctionCallContent("carried-call-1", "read_image", new Dictionary<string, object?> { ["path"] = "cat.png" })]),
+            new(ChatRole.Tool, [new FunctionResultContent("carried-call-1", "an image of a cat")]),
+        };
+
+        await Assert.ThrowsAnyAsync<Exception>(async () => await agent.RunAsync(messages, session));
+
+        // The result resolved its name from the transcript, not the map:
+        Assert.Contains("read_image", handler.LastRequestBody);
+        var map = GetFunctionNameMap(session);
+        Assert.True(map is null || map.Count == 0, "request-carried calls must not be recorded");
+    }
+
+    [Fact]
+    public async Task AgentRun_Prunes_AfterSuccessfulToolLoop()
+    {
+        // The function loop records the call (response 1), sends the result (request 2,
+        // resolved from the map), and prunes the entry once that request completed.
+        const string functionCallResponse = """
+            {
+              "id": "interaction-1",
+              "model": "gemini-3-flash-preview",
+              "steps": [
+                {
+                  "type": "function_call",
+                  "id": "k9323oby",
+                  "name": "run_bash_command",
+                  "arguments": {
+                    "command": "ls -R"
+                  }
+                }
+              ]
+            }
+            """;
+
+        var handler = new SequentialHandler(
+            (HttpStatusCode.OK, functionCallResponse, "application/json"),
+            (HttpStatusCode.OK, DefaultOkResponseJson, "application/json"));
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        var tools = new List<AITool> { AIFunctionFactory.Create(() => "file list", name: "run_bash_command") };
+        var agent = client.AsAIAgent(tools: tools);
+        var session = await agent.CreateSessionAsync();
+
+        var response = await agent.RunAsync("list files", session);
+
+        Assert.False(string.IsNullOrWhiteSpace(response.Text));
+        Assert.Equal(2, handler.RequestCount); // tool loop: call, then result follow-up
+        Assert.Contains("run_bash_command", handler.LastRequestBody); // name resolved from the map
+        Assert.True(GetFunctionNameMap(session) is not { } map || !map.ContainsKey("k9323oby"),
+            "the entry must be pruned once its result left successfully");
+    }
+
+    [Fact]
+    public async Task AgentRun_KeepsEntries_WhenFollowUpFails()
+    {
+        const string functionCallResponse = """
+            {
+              "id": "interaction-1",
+              "model": "gemini-3-flash-preview",
+              "steps": [
+                {
+                  "type": "function_call",
+                  "id": "k9323oby",
+                  "name": "run_bash_command",
+                  "arguments": {
+                    "command": "ls -R"
+                  }
+                }
+              ]
+            }
+            """;
+
+        var handler = new SequentialHandler(
+            (HttpStatusCode.OK, functionCallResponse, "application/json"),
+            (HttpStatusCode.ServiceUnavailable, """{"error":{"code":503,"status":"UNAVAILABLE"}}""", "application/json"));
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        var tools = new List<AITool> { AIFunctionFactory.Create(() => "file list", name: "run_bash_command") };
+        var agent = client.AsAIAgent(tools: tools);
+        var session = await agent.CreateSessionAsync();
+
+        await Assert.ThrowsAnyAsync<Exception>(async () => await agent.RunAsync("list files", session));
+
+        // The follow-up failed, so the entry survives for a retry (plan065 outcome 2).
+        Assert.NotNull(GetFunctionNameMap(session)?["k9323oby"]);
+    }
+
+    [Fact]
+    public async Task AgentStreamingRun_Prunes_AfterStreamCompletes()
+    {
+        // Streaming runs call the client streaming end-to-end, so the tool call itself
+        // arrives over SSE (recorded per streaming update) and the result follow-up is a
+        // second SSE stream that completes without error.
+        const string sseFunctionCall = SseFunctionCallPayload;
+        const string sseCompleted = """
+            event: interaction.completed
+            data: {"interaction":{"id":"interaction-stream-1","status":"completed","usage":{"total_tokens":5}},"event_type":"interaction.completed"}
+
+            """;
+
+        var handler = new SequentialHandler(
+            (HttpStatusCode.OK, sseFunctionCall, "text/event-stream"),
+            (HttpStatusCode.OK, sseCompleted, "text/event-stream"));
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        var tools = new List<AITool> { AIFunctionFactory.Create(() => "file list", name: "run_bash_command") };
+        var agent = client.AsAIAgent(tools: tools);
+        var session = await agent.CreateSessionAsync();
+
+        var updates = 0;
+        await foreach (var update in agent.RunStreamingAsync("list files", session))
+        {
+            updates++;
+        }
+
+        Assert.True(updates > 0);
+        Assert.Equal(2, handler.RequestCount); // tool loop: call, then streaming result follow-up
+        Assert.True(GetFunctionNameMap(session) is not { } map || !map.ContainsKey("k9323oby"),
+            "a completed stream accepted the results, so the entry must be pruned");
+    }
+
+    [Fact]
+    public async Task AgentStreamingRun_KeepsEntries_WhenNegotiationFails()
+    {
+        // Stream 1 delivers the tool call over SSE (entry recorded); stream 2 (carrying the
+        // result) fails negotiation before any update, so the entry must survive.
+        var handler = new SequentialHandler(
+            (HttpStatusCode.OK, SseFunctionCallPayload, "text/event-stream"),
+            (HttpStatusCode.InternalServerError, "boom", "application/json"));
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+        var tools = new List<AITool> { AIFunctionFactory.Create(() => "file list", name: "run_bash_command") };
+        var agent = client.AsAIAgent(tools: tools);
+        var session = await agent.CreateSessionAsync();
+
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+        {
+            await foreach (var update in agent.RunStreamingAsync("list files", session))
+            {
+            }
+        });
+
+        // An established stream that fails keeps its entries: the host may retry the same
+        // results, whose calls exist only in Gemini's server-side history (plan065 outcome 2).
+        Assert.NotNull(GetFunctionNameMap(session)?["k9323oby"]);
+    }
+
+    [Fact]
     public async Task GetResponseAsync_MapsFunctionCallStepToFunctionCallContent()
     {
         const string responseJson = """
@@ -910,6 +1075,75 @@ public sealed class GeminiInteractionsChatClientTests
             return new HttpResponseMessage(_statusCode)
             {
                 Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
+            };
+        }
+    }
+
+    private const string FunctionNamesByCallIdTestKey = "catherder.agents.ai.gemini.function_names_by_call_id";
+
+    private const string DefaultOkResponseJson = """
+        {
+          "id": "interaction-1",
+          "model": "gemini-3-flash-preview",
+          "steps": [
+            {
+              "type": "model_output",
+              "content": [{"type": "text", "text": "ok"}]
+            }
+          ]
+        }
+        """;
+
+    private static Dictionary<string, string>? GetFunctionNameMap(AgentSession session) =>
+        session.StateBag.TryGetValue(FunctionNamesByCallIdTestKey, out Dictionary<string, string>? map) ? map : null;
+
+    /// <summary>SSE payload delivering a function_call step (mirrors the Phase2To4 event shapes).</summary>
+    private const string SseFunctionCallPayload = """
+        event: interaction.created
+        data: {"interaction":{"id":"interaction-1","model":"gemini-3-flash-preview"},"event_type":"interaction.created"}
+
+        event: step.start
+        data: {"index":0,"step":{"type":"function_call","id":"k9323oby","name":"run_bash_command"},"event_type":"step.start"}
+
+        event: step.delta
+        data: {"index":0,"delta":{"type":"arguments","partial_arguments":"{\"command\":\"ls -R\"}"},"event_type":"step.delta"}
+
+        event: step.stop
+        data: {"index":0,"event_type":"step.stop"}
+
+        event: interaction.completed
+        data: {"interaction":{"id":"interaction-1","status":"requires_action","usage":{"total_tokens":77,"total_input_tokens":60,"total_output_tokens":17}},"event_type":"interaction.completed"}
+
+        """;
+
+    /// <summary>Recording handler with a per-response status/body/media-type queue.</summary>
+    private sealed class SequentialHandler : HttpMessageHandler
+    {
+        private readonly Queue<(HttpStatusCode StatusCode, string Body, string MediaType)> _responses;
+
+        public SequentialHandler(params (HttpStatusCode StatusCode, string Body, string MediaType)[] responses)
+            => _responses = new Queue<(HttpStatusCode, string, string)>(responses);
+
+        public int RequestCount { get; private set; }
+
+        public string? LastRequestBody { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            LastRequestBody = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+
+            if (_responses.Count == 0)
+            {
+                throw new InvalidOperationException("SequentialHandler ran out of queued responses.");
+            }
+
+            var (statusCode, body, mediaType) = _responses.Dequeue();
+            return new HttpResponseMessage(statusCode)
+            {
+                Content = new StringContent(body, Encoding.UTF8, mediaType),
             };
         }
     }

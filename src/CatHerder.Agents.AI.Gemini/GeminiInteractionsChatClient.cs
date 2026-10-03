@@ -18,6 +18,19 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 {
     private const string ApiRevisionHeaderName = "Api-Revision";
     private const string ApiRevisionHeaderValue = "2026-05-20";
+    /// <summary>
+    /// Call id → function name for calls whose result may still have to be sent in a later
+    /// request without the call present. Gemini keeps the conversation server-side (chained
+    /// via previous_interaction_id), so a tool-loop follow-up carries only the
+    /// function_result parts — and `function_result.name` is required in practice: the live
+    /// API rejects name-less results with HTTP 400 "function_response.name: Name cannot be
+    /// empty" (Api-Revision 2026-05-20), although the published reference marks `name` as
+    /// optional. Entries are recorded only for calls returned by Gemini responses/streams
+    /// and are pruned only after the request carrying the result completed successfully, so
+    /// retries after a failed request and sessions restored from persisted state keep
+    /// working. Hosted in the session state bag (per run, persisted by the host) — never a
+    /// static or instance-level cache.
+    /// </summary>
     private const string FunctionNamesByCallIdStateKey = "catherder.agents.ai.gemini.function_names_by_call_id";
 
     private readonly HttpClient _httpClient;
@@ -74,6 +87,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        var resultCallIds = CollectFunctionResultCallIds(messages);
         var request = BuildRequest(messages, options, stream: false);
         _logger?.LogDebug("Sending Interactions request for model {ModelId}", options?.ModelId ?? _modelId);
 
@@ -120,6 +134,11 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
         var chatResponse = MapInteractionToChatResponse(interaction, _logger);
 
+        // The request completed and its results were accepted: their call ids can never be
+        // needed again. Pruning only here (after the response was mapped) means a 200 that
+        // fails to parse keeps the entries for a retry.
+        PruneResolvedFunctionNames(resultCallIds);
+
         return chatResponse;
     }
 
@@ -129,6 +148,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        var resultCallIds = CollectFunctionResultCallIds(messages);
         var sseEnumerator = StreamWithSseAsync(messages, options, cancellationToken).GetAsyncEnumerator(cancellationToken);
 
         try
@@ -143,6 +163,12 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
                 yield return sseEnumerator.Current;
             }
+
+            // All updates were consumed without error: the results carried by this request
+            // were accepted. An established stream that fails mid-way never reaches this
+            // line, so its entries survive for the host's retry — the calls exist only in
+            // Gemini's server-side history and cannot be re-derived from the request.
+            PruneResolvedFunctionNames(resultCallIds);
         }
         finally
         {
@@ -506,7 +532,11 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                     throw UnsupportedMediaType(uriContent.MediaType);
 
                 case FunctionCallContent functionCall:
-                    RememberFunctionName(functionCall.CallId, functionCall.Name);
+                    // Deliberately not recorded in the call-id→name map: any result whose
+                    // call is present in the same request resolves through the transcript
+                    // lookup (TryResolveFunctionNameFromTranscript). Only calls returned by
+                    // Gemini responses/streams can ever need the map, so carried request
+                    // content (any provider) must not grow it.
                     content.Add(new GeminiInteractionContent
                     {
                         Type = "function_call",
@@ -552,6 +582,13 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         return content;
     }
 
+    /// <summary>
+    /// Resolves the required `function_result.name`. Order: the call-id map (session state),
+    /// a matching function_call in the same request's messages, then AdditionalProperties.
+    /// The name cannot simply be omitted: the live API rejects name-less results with HTTP
+    /// 400 "function_response.name: Name cannot be empty" (Api-Revision 2026-05-20),
+    /// although the published reference marks `name` as optional.
+    /// </summary>
     private static string ResolveFunctionName(FunctionResultContent functionResult, IReadOnlyList<ChatMessage> turns)
     {
         if (TryResolveFunctionNameFromSession(functionResult.CallId, out var sessionName))
@@ -650,6 +687,54 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         foreach (var functionCall in contents.OfType<FunctionCallContent>())
         {
             RememberFunctionName(functionCall.CallId, functionCall.Name);
+        }
+    }
+
+    /// <summary>Distinct non-empty call ids of the FunctionResultContent carried by the request input.</summary>
+    private static List<string> CollectFunctionResultCallIds(IEnumerable<ChatMessage> messages)
+    {
+        var callIds = new List<string>();
+        foreach (var message in messages)
+        {
+            foreach (var functionResult in message.Contents.OfType<FunctionResultContent>())
+            {
+                if (!string.IsNullOrWhiteSpace(functionResult.CallId) && !callIds.Contains(functionResult.CallId))
+                {
+                    callIds.Add(functionResult.CallId);
+                }
+            }
+        }
+
+        return callIds;
+    }
+
+    /// <summary>
+    /// Removes map entries whose function_result left successfully with the completed
+    /// request. Only called on success paths: a failed request keeps its entries so a retry
+    /// can rebuild the same request.
+    /// </summary>
+    private static void PruneResolvedFunctionNames(IReadOnlyList<string> callIds)
+    {
+        if (callIds.Count == 0)
+        {
+            return;
+        }
+
+        var stateBag = AIAgent.CurrentRunContext?.Session?.StateBag;
+        if (stateBag?.TryGetValue(FunctionNamesByCallIdStateKey, out Dictionary<string, string>? functionNamesByCallId) != true || functionNamesByCallId is null)
+        {
+            return;
+        }
+
+        var removed = false;
+        foreach (var callId in callIds)
+        {
+            removed |= functionNamesByCallId.Remove(callId);
+        }
+
+        if (removed)
+        {
+            stateBag.SetValue(FunctionNamesByCallIdStateKey, functionNamesByCallId);
         }
     }
 

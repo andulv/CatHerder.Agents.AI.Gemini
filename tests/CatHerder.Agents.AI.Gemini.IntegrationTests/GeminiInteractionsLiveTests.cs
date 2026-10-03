@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -136,6 +137,83 @@ public sealed class GeminiInteractionsLiveTests
         var response = await agent.RunAsync("Use the get_weather tool for Bergen and summarize the result.", session);
 
         Assert.False(string.IsNullOrWhiteSpace(response.Text));
+    }
+
+    [LiveGeminiFact]
+    public async Task RawFollowUp_FunctionResultWithoutName_IsRejectedWith400()
+    {
+        // plan065: proves the external assumption behind the call-id→name map. The adapter
+        // itself refuses to send name-less results, so this test speaks raw Interactions
+        // JSON: a server-side tool loop follow-up whose function_result omits "name" must
+        // be rejected with 400, although the published reference marks "name" optional.
+        var config = LiveGeminiConfiguration.Current;
+        using var httpClient = new HttpClient { BaseAddress = config.Endpoint };
+
+        static HttpRequestMessage Post(LiveGeminiConfiguration config, object body)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, "interactions")
+            {
+                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
+            };
+            request.Headers.Add("x-goog-api-key", config.ApiKey);
+            request.Headers.Add("Api-Revision", "2026-05-20");
+            return request;
+        }
+
+        // Request 1: trigger a function call.
+        using var first = Post(config, new
+        {
+            model = config.ModelId,
+            input = "Use the get_weather tool for Bergen and report the result.",
+            tools = new[]
+            {
+                new
+                {
+                    type = "function",
+                    name = "get_weather",
+                    description = "Gets the current weather for a location.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new { location = new { type = "string" } },
+                        required = new[] { "location" },
+                    },
+                },
+            },
+        });
+
+        using var firstResponse = await httpClient.SendAsync(first);
+        var firstBody = await firstResponse.Content.ReadAsStringAsync();
+        firstResponse.EnsureSuccessStatusCode();
+
+        var firstJson = JsonNode.Parse(firstBody)!.AsObject();
+        var interactionId = firstJson["id"]!.GetValue<string>();
+        var functionCall = firstJson["steps"]!.AsArray()
+            .Select(step => step!.AsObject())
+            .First(step => step["type"]?.GetValue<string>() == "function_call");
+        var callId = functionCall["id"]!.GetValue<string>();
+
+        // Request 2: send the result without "name" — the API must reject it.
+        using var second = Post(config, new
+        {
+            model = config.ModelId,
+            previous_interaction_id = interactionId,
+            input = new[]
+            {
+                new
+                {
+                    type = "function_result",
+                    call_id = callId,
+                    result = "Crisp and clear in Bergen.",
+                },
+            },
+        });
+
+        using var secondResponse = await httpClient.SendAsync(second);
+        var secondBody = await secondResponse.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, secondResponse.StatusCode);
+        Assert.Contains("function_response.name", secondBody);
     }
 
     [LiveGeminiBuiltInToolFact]
