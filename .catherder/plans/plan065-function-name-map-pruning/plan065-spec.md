@@ -3,7 +3,7 @@ type: plan-spec
 description: "Plan 065 - keep the call-ID-to-name map small: record only calls that still need a result, prune after the result left successfully, and document the live-API requirement of function_result.name"
 status: ready
 created: 2026-10-03T15:55:00+02:00
-updated: 2026-10-03T15:55:00+02:00
+updated: 2026-10-03T18:50:52+02:00
 ---
 # Plan 065 Spec — Function-Name Map Pruning
 
@@ -46,11 +46,17 @@ dropped — but almost all of its content is dead weight.
    - `function_call` steps returned by Gemini in a response or stream (the tool loop
      answers them in the next service call);
    - calls sent in a request are **not** recorded; their results are in the same request
-     and resolve through the transcript lookup.
+     and resolve through the transcript lookup. A unit test pins this rule — carried
+     request content is the dominant growth source (the 291-entry parent session consists
+     almost entirely of cross-provider carried calls).
 2. **Prune only after success.** A call's entry is removed when a request containing its
    `function_result` completed with a success status from the API. A failed request keeps
-   the entries, so a retry can rebuild the same request. Streaming counts as success when
-   the stream was established (first event received) — the results are then on their way.
+   the entries, so a retry can rebuild the same request. For streaming, success means the
+   stream **completed**: all SSE updates were consumed without error. A stream that fails
+   mid-way keeps the entries even when it was already established — the host may retry the
+   same results, whose calls exist only server-side, so the map must still resolve them.
+   Concretely, pruning runs at the completion points: after `GetResponseAsync` has mapped
+   the response, and after `GetStreamingResponseAsync` has delivered all updates.
 3. **Bounded size.** After any completed request, the map holds at most the calls whose
    results have not been sent successfully (in practice: the open calls of the current
    tool loop, plus calls answered by results that have not left yet).
@@ -91,10 +97,19 @@ dropped — but almost all of its content is dead weight.
 Direction only.
 
 - The map write sites: `RememberFunctionName` at the response/stream call sites stays;
-  the call site in request content mapping (`:482`) is removed.
-- Pruning: after a successful `GetResponseAsync`/established stream, remove the call ids
-  whose `FunctionResultContent` were part of that request's input. Note the input may
-  contain several results in one tool-role message; collect ids before mapping content.
+  the call site in request content mapping (`:509`, `MapTurnContent`'s `FunctionCallContent`
+  case) is removed. Removing it is safe because of this invariant, which the code comment
+  at the removal site must state: **any result whose call is present in the same request
+  resolves through the transcript lookup** (`TryResolveFunctionNameFromTranscript`), so a
+  result can only need the map when its call came from a Gemini response/stream.
+- Pruning: after a request that carried `FunctionResultContent` completed successfully —
+  concretely at the end of `GetResponseAsync` (after `MapInteractionToChatResponse`, so a
+  200 response that fails to parse keeps the entries for a retry) and in
+  `GetStreamingResponseAsync` after its update loop finished without error — remove the
+  call ids whose results were part of that request's input. Collect the ids before
+  building the request (the input may contain several results in one tool-role message).
+  Early-abandoned streams (enumerator disposed before completion) keep their entries —
+  the conservative direction costs nothing.
 - The unit tests need a scenario where the same client instance answers a call, then
   sends the result (map entry used, then removed), and one where the request fails
   (entry kept). Mirror the existing `RecordingHandler` style.
@@ -105,4 +120,8 @@ Direction only.
 ## 7. Open Questions
 
 1. (resolved: yes, add it) Include the gated live test proving `function_result.name` is required?
-2. (resolved: after an established stream) Does a streaming follow-up count as success for pruning?
+2. (resolved 2026-10-03, revised during review: prune when the stream **completes** — all
+   updates consumed without error — not when it is established. An established stream that
+   fails mid-way must keep the entries: the host can retry the same results afterwards,
+   and their calls exist only server-side, so a pruned map would throw exactly the
+   "name cannot be resolved" error the map exists to prevent.)
