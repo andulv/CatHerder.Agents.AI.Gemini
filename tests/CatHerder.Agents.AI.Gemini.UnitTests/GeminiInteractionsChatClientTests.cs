@@ -323,88 +323,103 @@ public sealed class GeminiInteractionsChatClientTests
     }
 
     [Fact]
-    public async Task GetResponseAsync_DropsUnsupportedMediaInAssistantTurns()
+    public async Task GetResponseAsync_Throws_WhenAssistantTurnHasUnsupportedMedia()
     {
-        // Documented behaviour: only user turns reject unmappable media. Assistant turns are
-        // replayed history; the API has no audio/video parts in model_output steps, so
-        // unmappable binary content there is dropped instead of throwing.
+        // Nothing is dropped silently: media the request cannot carry fails before any HTTP call.
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(() => client.GetResponseAsync(
+        [
+            new ChatMessage(ChatRole.Assistant, [new TextContent("Here is a clip."), new DataContent(new byte[] { 1, 2, 3 }, "video/mp4")]),
+            new ChatMessage(ChatRole.User, "Tell me more."),
+        ]));
+
+        Assert.Contains("video/mp4", ex.Message);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_SendsAudioInAssistantTurnAsModelOutput()
+    {
         var handler = new RecordingHandler();
         using var httpClient = CreateHttpClient(handler);
         using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
         await client.GetResponseAsync(
         [
-            new ChatMessage(ChatRole.Assistant, [new TextContent("Here is a clip."), new DataContent(new byte[] { 1, 2, 3 }, "video/mp4")]),
+            new ChatMessage(ChatRole.Assistant, [new TextContent("Here is a clip."), new DataContent(new byte[] { 1, 2, 3 }, "audio/wav")]),
             new ChatMessage(ChatRole.User, "Tell me more."),
         ]);
 
         var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
-        var assistantStep = Assert.IsType<JsonObject>(input[0]);
-        var content = Assert.IsType<JsonArray>(assistantStep["content"]);
-        Assert.Single(content);
-        Assert.Equal("text", content[0]!["type"]!.GetValue<string>());
+        var content = Assert.IsType<JsonArray>(input[0]!["content"]);
+        Assert.Equal(["text", "audio"], content.Select(item => item!["type"]!.GetValue<string>()));
     }
 
     [Fact]
-    public async Task GetResponseAsync_Throws_WhenRequestExceedsMaxInlineRequestBytes()
+    public async Task GetResponseAsync_Throws_WhenUserTurnHasHostedFile()
     {
         var handler = new RecordingHandler();
         using var httpClient = CreateHttpClient(handler);
-        using var client = new GeminiInteractionsChatClient(
-            httpClient,
-            "gemini-3-flash-preview",
-            new GeminiInteractionsChatClientOptions { MaxInlineRequestBytes = 10 });
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
-        var ex = await Assert.ThrowsAsync<GeminiRequestSizeExceededException>(async () =>
-            await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]));
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(() => client.GetResponseAsync(
+            [new ChatMessage(ChatRole.User, [new TextContent("Read this."), new HostedFileContent("file-123")])]));
 
-        Assert.Contains(ex.RequestedBytes.ToString(), ex.Message);
-        Assert.Contains("10", ex.Message);
-        Assert.Contains("20 MB", ex.Message);
+        Assert.Contains("file-123", ex.Message);
         Assert.Equal(0, handler.RequestCount);
     }
 
     [Fact]
-    public async Task GetStreamingResponseAsync_Throws_WhenRequestExceedsMaxInlineRequestBytes()
+    public async Task GetResponseAsync_MovesPdfAndAudioFunctionResultsToFollowingUserInput()
     {
+        // function_result carries only text and images; PDF and audio follow as user input.
         var handler = new RecordingHandler();
         using var httpClient = CreateHttpClient(handler);
-        using var client = new GeminiInteractionsChatClient(
-            httpClient,
-            "gemini-3-flash-preview",
-            new GeminiInteractionsChatClientOptions { MaxInlineRequestBytes = 10 });
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
 
-        var updates = client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "Hello")]);
-        var enumerator = updates.GetAsyncEnumerator();
-
-        try
-        {
-            await Assert.ThrowsAsync<GeminiRequestSizeExceededException>(async () =>
-                await enumerator.MoveNextAsync());
-        }
-        finally
-        {
-            await enumerator.DisposeAsync();
-        }
-
-        Assert.Equal(0, handler.RequestCount);
-    }
-
-    [Fact]
-    public async Task GetResponseAsync_SendsOversizeRequest_WhenMaxInlineRequestBytesIsNull()
-    {
-        var handler = new RecordingHandler();
-        using var httpClient = CreateHttpClient(handler);
-        using var client = new GeminiInteractionsChatClient(
-            httpClient,
-            "gemini-3-flash-preview",
-            new GeminiInteractionsChatClientOptions { MaxInlineRequestBytes = null });
-
-        // ~20 MB of base64 payload: over the documented inline limit, but null disables the check.
         await client.GetResponseAsync(
-            [new ChatMessage(ChatRole.User, [new DataContent(new byte[15_000_001], "image/png")])]);
+        [
+            new ChatMessage(ChatRole.User, "Fetch the files."),
+            new ChatMessage(ChatRole.Assistant,
+            [
+                new FunctionCallContent("call-1", "read_file", new Dictionary<string, object?>()),
+                new FunctionCallContent("call-2", "read_file", new Dictionary<string, object?>()),
+            ]),
+            new ChatMessage(ChatRole.Tool,
+            [
+                new FunctionResultContent("call-1", new DataContent("%PDF-1.7"u8.ToArray(), "application/pdf")),
+                new FunctionResultContent("call-2", new AIContent[] { new TextContent("clip"), new DataContent(new byte[] { 1, 2, 3 }, "audio/mp3") }),
+            ]),
+        ]);
 
-        Assert.Equal(1, handler.RequestCount);
+        var input = Assert.IsType<JsonArray>(ParseCapturedPayload(handler)["input"]);
+        Assert.Equal(
+            ["user_input", "function_call", "function_call", "function_result", "function_result", "user_input"],
+            input.Select(step => step!["type"]!.GetValue<string>()));
+        Assert.Contains("application/pdf", input[3]!["result"]!.ToJsonString());
+        var media = Assert.IsType<JsonArray>(input[5]!["content"]);
+        Assert.Equal(["text", "document", "audio"], media.Select(item => item!["type"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_Throws_WhenFunctionResultHasUnsupportedMedia()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = CreateHttpClient(handler);
+        using var client = new GeminiInteractionsChatClient(httpClient, "gemini-3-flash-preview");
+
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(() => client.GetResponseAsync(
+        [
+            new ChatMessage(ChatRole.User, "Fetch the clip."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call-1", "read_file", new Dictionary<string, object?>())]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call-1", new DataContent(new byte[] { 1, 2, 3 }, "video/mp4"))]),
+        ]));
+
+        Assert.Contains("video/mp4", ex.Message);
+        Assert.Equal(0, handler.RequestCount);
     }
 
     [Fact]

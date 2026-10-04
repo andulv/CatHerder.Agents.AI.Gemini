@@ -299,17 +299,6 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     private HttpRequestMessage CreateInteractionRequestMessage(GeminiInteractionRequest request, bool acceptEventStream)
     {
         var json = JsonSerializer.Serialize(request, JsonOptions);
-        var byteCount = Encoding.UTF8.GetByteCount(json);
-
-        if (_options.MaxInlineRequestBytes is { } maxInlineRequestBytes && byteCount > maxInlineRequestBytes)
-        {
-            throw new GeminiRequestSizeExceededException(
-                $"The serialized Gemini Interactions request is {byteCount} bytes, which exceeds the inline request limit of {maxInlineRequestBytes} bytes. "
-                + $"The Gemini Interactions API accepts at most 20 MB of inline content per request (https://ai.google.dev/gemini-api/docs/audio). "
-                + "Reduce the inline payload, raise GeminiInteractionsChatClientOptions.MaxInlineRequestBytes, or disable the check by setting it to null.",
-                byteCount,
-                maxInlineRequestBytes);
-        }
 
         var requestMessage = new HttpRequestMessage(HttpMethod.Post, acceptEventStream ? "interactions?alt=sse" : "interactions")
         {
@@ -382,7 +371,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
         if (turns.Count == 1 && turns[0].Role == ChatRole.User)
         {
-            var singleUserContent = MapTurnContent(turns[0], turns, rejectUnsupportedContent: true);
+            var singleUserContent = MapTurnContent(turns[0], turns);
             if (singleUserContent.Count == 1 && singleUserContent[0].Type == "text")
             {
                 return singleUserContent[0].Text ?? string.Empty;
@@ -398,23 +387,31 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     {
         var steps = new List<GeminiInteractionInputStep>();
 
+        // Media that function_result cannot carry (PDF, audio), sent as user input right after
+        // the function results it came from.
+        var functionResultMedia = new List<GeminiInteractionContent>();
+
         foreach (var turn in turns)
         {
+            if (turn.Role == ChatRole.Tool)
+            {
+                AddFunctionResultInputSteps(turn, turns, steps, functionResultMedia);
+                continue;
+            }
+
+            FlushFunctionResultMedia(steps, functionResultMedia);
+
             if (turn.Role == ChatRole.Assistant)
             {
                 AddAssistantInputSteps(turn, turns, steps);
                 continue;
             }
 
-            if (turn.Role == ChatRole.Tool)
+            var content = MapTurnContent(turn, turns);
+            if (content.FirstOrDefault(item => item.Type is not ("text" or "image" or "document" or "audio")) is { } unsupported)
             {
-                AddFunctionResultInputSteps(turn, turns, steps);
-                continue;
+                throw new NotSupportedException($"Gemini Interactions cannot send '{unsupported.Type}' content in a {turn.Role} message.");
             }
-
-            var content = MapTurnContent(turn, turns, rejectUnsupportedContent: true)
-                .Where(item => item.Type is "text" or "image" or "document" or "audio")
-                .ToList();
 
             steps.Add(new GeminiInteractionInputStep
             {
@@ -423,13 +420,14 @@ public sealed class GeminiInteractionsChatClient : IChatClient
             });
         }
 
+        FlushFunctionResultMedia(steps, functionResultMedia);
         return steps;
     }
 
     private static void AddAssistantInputSteps(ChatMessage turn, IReadOnlyList<ChatMessage> turns, List<GeminiInteractionInputStep> steps)
     {
         var modelOutputContent = new List<GeminiInteractionContent>();
-        foreach (var item in MapTurnContent(turn, turns, rejectUnsupportedContent: false))
+        foreach (var item in MapTurnContent(turn, turns))
         {
             if (item.Type == "function_call")
             {
@@ -443,10 +441,12 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                 continue;
             }
 
-            if (item.Type is "text" or "image" or "document")
+            if (item.Type is not ("text" or "image" or "document" or "audio"))
             {
-                modelOutputContent.Add(item);
+                throw new NotSupportedException($"Gemini Interactions cannot send '{item.Type}' content in an assistant message.");
             }
+
+            modelOutputContent.Add(item);
         }
 
         if (modelOutputContent.Count > 0)
@@ -459,21 +459,51 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
     }
 
-    private static void AddFunctionResultInputSteps(ChatMessage turn, IReadOnlyList<ChatMessage> turns, List<GeminiInteractionInputStep> steps)
+    private static void AddFunctionResultInputSteps(
+        ChatMessage turn,
+        IReadOnlyList<ChatMessage> turns,
+        List<GeminiInteractionInputStep> steps,
+        List<GeminiInteractionContent> functionResultMedia)
     {
-        foreach (var item in MapTurnContent(turn, turns, rejectUnsupportedContent: false).Where(item => item.Type == "function_result"))
+        foreach (var content in turn.Contents)
         {
+            if (content is not FunctionResultContent functionResult)
+            {
+                throw new NotSupportedException(
+                    $"Gemini Interactions cannot send '{content.GetType().Name}' content in a tool message; tool messages carry function results only.");
+            }
+
+            if (GeminiBuiltInToolBridge.IsInformationalBuiltInTool(functionResult))
+            {
+                continue;
+            }
+
             steps.Add(new GeminiInteractionInputStep
             {
                 Type = "function_result",
-                Name = item.Name,
-                CallId = item.CallId,
-                Result = item.Result,
+                Name = ResolveFunctionName(functionResult, turns),
+                CallId = functionResult.CallId,
+                Result = ToFunctionResultValue(functionResult, functionResultMedia),
             });
         }
     }
 
-    private static List<GeminiInteractionContent> MapTurnContent(ChatMessage message, IReadOnlyList<ChatMessage> turns, bool rejectUnsupportedContent)
+    private static void FlushFunctionResultMedia(List<GeminiInteractionInputStep> steps, List<GeminiInteractionContent> functionResultMedia)
+    {
+        if (functionResultMedia.Count == 0)
+        {
+            return;
+        }
+
+        steps.Add(new GeminiInteractionInputStep
+        {
+            Type = "user_input",
+            Content = [new GeminiInteractionContent { Type = "text", Text = FunctionResultMediaIntro }, .. functionResultMedia],
+        });
+        functionResultMedia.Clear();
+    }
+
+    private static List<GeminiInteractionContent> MapTurnContent(ChatMessage message, IReadOnlyList<ChatMessage> turns)
     {
         var content = new List<GeminiInteractionContent>();
         var hasTextContent = false;
@@ -525,11 +555,15 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                     content.Add(MapAudioContent(uriContent));
                     break;
 
-                case DataContent dataContent when rejectUnsupportedContent:
+                case DataContent dataContent:
                     throw UnsupportedMediaType(dataContent.MediaType);
 
-                case UriContent uriContent when rejectUnsupportedContent:
+                case UriContent uriContent:
                     throw UnsupportedMediaType(uriContent.MediaType);
+
+                case HostedFileContent hostedFile:
+                    throw new NotSupportedException(
+                        $"Gemini Interactions cannot send hosted file '{hostedFile.FileId}': provider file references are not supported, send the file inline.");
 
                 case FunctionCallContent functionCall:
                     // Deliberately not recorded in the call-id→name map: any result whose
@@ -554,7 +588,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
                         Type = "function_result",
                         Name = resolvedFunctionName,
                         CallId = functionResult.CallId,
-                        Result = ToFunctionResultValue(functionResult.Result),
+                        Result = ToFunctionResultValue(functionResult, functionResultMedia: null),
                     });
 
                     break;
@@ -738,8 +772,9 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         }
     }
 
-    private static object? ToFunctionResultValue(object? result)
+    private static object? ToFunctionResultValue(FunctionResultContent functionResult, List<GeminiInteractionContent>? functionResultMedia)
     {
+        var result = functionResult.Result;
         if (result is null)
         {
             return null;
@@ -752,12 +787,12 @@ public sealed class GeminiInteractionsChatClient : IChatClient
 
         if (result is AIContent contentItem)
         {
-            return MapFunctionResultContent([contentItem]);
+            return MapFunctionResultContent(functionResult, [contentItem], functionResultMedia);
         }
 
         if (result is IEnumerable<AIContent> contentItems)
         {
-            return MapFunctionResultContent(contentItems);
+            return MapFunctionResultContent(functionResult, contentItems, functionResultMedia);
         }
 
         // Structured results are data for the model, not typed result parts. Their properties
@@ -765,31 +800,68 @@ public sealed class GeminiInteractionsChatClient : IChatClient
         return JsonSerializer.Serialize(result, JsonSerializerOptions.Default);
     }
 
-    private static List<GeminiInteractionContent> MapFunctionResultContent(IEnumerable<AIContent> contentItems)
+    /// <summary>
+    /// function_result carries only text and image parts. PDF and audio parts are moved to the
+    /// user input that follows the function results (<paramref name="functionResultMedia"/>),
+    /// and the result says so; anything else cannot be sent and throws.
+    /// </summary>
+    private static List<GeminiInteractionContent> MapFunctionResultContent(
+        FunctionResultContent functionResult,
+        IEnumerable<AIContent> contentItems,
+        List<GeminiInteractionContent>? functionResultMedia)
     {
         var items = new List<GeminiInteractionContent>();
         foreach (var item in contentItems)
         {
-            if (item is TextContent textContent)
+            switch (item)
             {
-                items.Add(new GeminiInteractionContent
-                {
-                    Type = "text",
-                    Text = textContent.Text ?? string.Empty,
-                });
-            }
-            else if (item is DataContent dataContent && dataContent.HasTopLevelMediaType("image"))
-            {
-                items.Add(MapImageContent(dataContent));
-            }
-            else if (item is UriContent uriContent && uriContent.HasTopLevelMediaType("image"))
-            {
-                items.Add(MapImageContent(uriContent));
+                case TextContent textContent:
+                    items.Add(new GeminiInteractionContent { Type = "text", Text = textContent.Text ?? string.Empty });
+                    break;
+
+                case DataContent dataContent when dataContent.HasTopLevelMediaType("image"):
+                    items.Add(MapImageContent(dataContent));
+                    break;
+
+                case UriContent uriContent when uriContent.HasTopLevelMediaType("image"):
+                    items.Add(MapImageContent(uriContent));
+                    break;
+
+                case DataContent or UriContent when functionResultMedia is not null && MapMovableMedia(item) is { } media:
+                    functionResultMedia.Add(media);
+                    items.Add(new GeminiInteractionContent
+                    {
+                        Type = "text",
+                        Text = $"[{media.MimeType} returned; it follows in the next user input ({FunctionResultMediaIntro})]",
+                    });
+                    break;
+
+                default:
+                    throw new NotSupportedException(
+                        $"Gemini Interactions cannot send {Describe(item)} in the result of function call '{functionResult.CallId}': function results carry text, images, PDFs and audio only.");
             }
         }
 
         return items;
     }
+
+    private const string FunctionResultMediaIntro = "Media returned by the function calls above";
+
+    private static GeminiInteractionContent? MapMovableMedia(AIContent item) => item switch
+    {
+        DataContent data when data.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase) => MapDocumentContent(data),
+        UriContent uri when uri.MediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase) => MapDocumentContent(uri),
+        DataContent data when data.HasTopLevelMediaType("audio") => MapAudioContent(data),
+        UriContent uri when uri.HasTopLevelMediaType("audio") => MapAudioContent(uri),
+        _ => null,
+    };
+
+    private static string Describe(AIContent item) => item switch
+    {
+        DataContent data => $"media type '{data.MediaType}'",
+        UriContent uri => $"media type '{uri.MediaType}'",
+        _ => $"'{item.GetType().Name}' content",
+    };
 
     private static GeminiInteractionContent MapImageContent(DataContent image) => new()
     {
@@ -834,7 +906,7 @@ public sealed class GeminiInteractionsChatClient : IChatClient
     };
 
     private static NotSupportedException UnsupportedMediaType(string? mediaType) =>
-        new($"Gemini Interactions does not support media type '{mediaType}' in user messages. Supported media types are image/*, audio/*, and application/pdf.");
+        new($"Gemini Interactions does not support media type '{mediaType}' in messages. Supported media types are image/*, audio/*, and application/pdf.");
 
     private static GeminiInteractionGenerationConfig? MapChatOptionsToGenerationConfig(ChatOptions? options)
     {

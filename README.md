@@ -93,18 +93,19 @@ The media type is passed through as-is (e.g. `audio/wav`, `audio/mp3`); which fo
 API accepts is documented by Google (wav, mp3, aiff, aac, ogg, flac on the Interactions
 API audio page). Audio is input-only; model audio output is not mapped.
 
-Other `DataContent` / `UriContent` media types in user messages (e.g. `video/*`) throw
-`NotSupportedException` instead of being silently dropped. Media in assistant-turn and
-function-result content is dropped, because the API's `model_output` / `function_result`
-steps do not carry audio parts.
+The same mapping applies to media in assistant turns (sent as `model_output`).
+`function_result` carries only text and image parts, so PDF and audio returned by a function
+are sent as a `user_input` step right after the function results, and the result text points
+to it.
 
-### Inline request size limit
+Nothing is dropped silently: other media types (e.g. `video/*`), `HostedFileContent`, and
+content a message role cannot carry throw `NotSupportedException` before any request is sent.
 
-The Interactions API accepts at most 20 MB of inline content per request (prompts and all
-inline files included). `GeminiInteractionsChatClientOptions.MaxInlineRequestBytes`
-(default `20_000_000`) makes the client reject oversized requests with
-`GeminiRequestSizeExceededException` before any HTTP call is made; set it to `null` to
-disable the check.
+### Inline request size
+
+The client does not limit the request size; the API decides. Google documents 100 MB per
+inline request (https://ai.google.dev/gemini-api/docs/file-input-methods); a live check on
+2026-10-04 accepted a 266 MB request with inline MP3 audio.
 
 ## Integration Tests
 

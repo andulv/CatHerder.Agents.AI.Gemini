@@ -140,6 +140,57 @@ public sealed class GeminiInteractionsLiveTests
     }
 
     [LiveGeminiFact]
+    public async Task ChatClientAgent_FunctionReturningPdf_ModelReadsThePdf()
+    {
+        // function_result cannot carry a PDF, so the adapter sends it as user input after the
+        // function result. The follow-up is chained (previous_interaction_id), so this also
+        // proves the API accepts user input right after function results in that request.
+        using var client = LiveGeminiConfiguration.Current.CreateChatClient();
+        var pdfTool = AIFunctionFactory.Create(
+            () => new DataContent(MinimalPdf("The code word is PELICAN-58."), "application/pdf"),
+            name: "get_document",
+            description: "Returns the requested document as a PDF.");
+        var agent = client.AsAIAgent(
+            instructions: "Use the get_document tool when asked about the document.",
+            name: "GeminiPdfToolAgent",
+            tools: [pdfTool]);
+        var session = await agent.CreateSessionAsync();
+
+        var response = await agent.RunAsync("Call get_document and tell me the code word in the document.", session);
+
+        Assert.Contains("PELICAN-58", response.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static byte[] MinimalPdf(string text)
+    {
+        var objects = new[]
+        {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            $"<< /Length {text.Length + 30} >>\nstream\nBT /F1 24 Tf 72 700 Td ({text}) Tj ET\nendstream",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        };
+        var pdf = new StringBuilder("%PDF-1.4\n");
+        var offsets = new List<int>();
+        for (var i = 0; i < objects.Length; i++)
+        {
+            offsets.Add(pdf.Length);
+            pdf.Append($"{i + 1} 0 obj\n{objects[i]}\nendobj\n");
+        }
+
+        var xref = pdf.Length;
+        pdf.Append($"xref\n0 {objects.Length + 1}\n0000000000 65535 f \n");
+        foreach (var offset in offsets)
+        {
+            pdf.Append($"{offset:D10} 00000 n \n");
+        }
+
+        pdf.Append($"trailer\n<< /Size {objects.Length + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+        return Encoding.ASCII.GetBytes(pdf.ToString());
+    }
+
+    [LiveGeminiFact]
     public async Task RawFollowUp_FunctionResultWithoutName_IsRejectedWith400()
     {
         // plan065: proves the external assumption behind the call-id→name map. The adapter
